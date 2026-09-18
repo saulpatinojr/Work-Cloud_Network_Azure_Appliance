@@ -115,6 +115,35 @@ jobs:
             exit 1
           fi
 
+      # A delivery-portal account created by this appliance's storage module is
+      # deny-by-default, so allow this runner's public IP for the upload and
+      # remove it again afterwards (harmless on an account that allows all).
+      - name: Ensure storage account is reachable from this runner
+        env:
+          AZURE_STORAGE_ACCOUNT: ${{ inputs.azure_storage_account }}
+        run: |
+          STORAGE_ACCOUNT_RG=$(az storage account show --name "$AZURE_STORAGE_ACCOUNT" --query resourceGroup -o tsv --only-show-errors)
+          echo "STORAGE_ACCOUNT_RG=$STORAGE_ACCOUNT_RG" >> "$GITHUB_ENV"
+          RUNNER_IP=$(curl -s https://api.ipify.org || echo "")
+          if [ -z "$RUNNER_IP" ]; then
+            echo "::warning::Could not determine the runner's public IP; the upload may be refused by the storage firewall."
+            exit 0
+          fi
+          az storage account network-rule add --account-name "$AZURE_STORAGE_ACCOUNT" --resource-group "$STORAGE_ACCOUNT_RG" --ip-address "$RUNNER_IP" --only-show-errors > /dev/null
+          # Firewall rule propagation is not immediate — wait until the data
+          # plane accepts this runner before publishing.
+          for i in $(seq 1 18); do
+            if az storage container list --account-name "$AZURE_STORAGE_ACCOUNT" --auth-mode key --num-results 1 --only-show-errors -o none 2>/dev/null; then
+              echo "Storage data plane reachable from runner."
+              break
+            fi
+            if [ "$i" = "18" ]; then
+              echo "::warning::Storage account $AZURE_STORAGE_ACCOUNT data plane still unreachable after ~3 minutes."
+            else
+              sleep 10
+            fi
+          done
+
       - name: Run cna publish
         env:
           IMAGE_TAG: ${{ inputs.image_tag }}
@@ -136,3 +165,16 @@ jobs:
             -v "${{ github.workspace }}/engagements:/app/engagements:ro" \
             "${{ env.REGISTRY }}/${{ env.DOCKERHUB_NAMESPACE }}/${{ env.IMAGE_REPOSITORY }}:$IMAGE_TAG" \
             "${ARGS[@]}"
+
+      - name: Remove Runner IP from storage account
+        if: always()
+        env:
+          AZURE_STORAGE_ACCOUNT: ${{ inputs.azure_storage_account }}
+        run: |
+          if [ -z "${STORAGE_ACCOUNT_RG:-}" ]; then
+            exit 0
+          fi
+          RUNNER_IP=$(curl -s https://api.ipify.org || echo "")
+          if [ -n "$RUNNER_IP" ]; then
+            az storage account network-rule remove --account-name "$AZURE_STORAGE_ACCOUNT" --resource-group "$STORAGE_ACCOUNT_RG" --ip-address "$RUNNER_IP" --only-show-errors >/dev/null 2>&1 || true
+          fi

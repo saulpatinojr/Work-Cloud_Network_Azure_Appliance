@@ -278,3 +278,11 @@ variable "github_token" {
   type        = string
   sensitive   = true
 }
+
+# ─── Deploy runner ────────────────────────────────────────────────────────────
+variable "deploy_runner_ip" {
+  description = "Public IP of the runner executing this apply (TF_VAR_deploy_runner_ip, set by 210-deploy). Used only when the storage account is created, to allow-list the runner on its deny-by-default firewall for the static-website provisioning in the same apply; afterwards the workflows manage the transient rule and Terraform ignores it."
+  type        = string
+  default     = ""
+  nullable    = false
+}

@@ -38,3 +38,10 @@ variable "deliverable_retention_days" {
   type        = number
   default     = 90
 }
+
+variable "bootstrap_ip_rules" {
+  description = "Public IPs allow-listed on the account's deny-by-default firewall at creation time (the deploy runner's, so the static website can be provisioned over the data plane in the same apply). Ignored after creation: the workflows add and remove the transient runner IP imperatively."
+  type        = list(string)
+  default     = []
+  nullable    = false
+}

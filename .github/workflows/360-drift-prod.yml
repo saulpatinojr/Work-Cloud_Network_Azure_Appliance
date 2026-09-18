@@ -129,6 +129,50 @@ jobs:
             echo "Key Vault $KEY_VAULT_NAME does not exist yet; nothing to open."
           fi
 
+      # The application storage account is deny-by-default too (storage module):
+      # azurerm_storage_account_static_website is provisioned and refreshed over
+      # the data plane, so this runner's public IP must be allow-listed while
+      # Terraform runs, exactly as for Key Vault above. An account not yet in
+      # state is created by Terraform with the IP in its ip_rules
+      # (TF_VAR_deploy_runner_ip → workload variable deploy_runner_ip), so the
+      # first apply can provision the static website too; ignore_changes keeps
+      # the transient rule from fighting Terraform afterwards.
+      - name: Ensure storage account is reachable during drift plan
+        working-directory: infra/terraform/environments/prod/workload
+        run: |
+          RUNNER_IP=$(curl -s https://api.ipify.org || echo "")
+          if [ -z "$RUNNER_IP" ]; then
+            echo "::warning::Could not determine the runner's public IP; storage data-plane calls may be refused by the firewall."
+            exit 0
+          fi
+          echo "TF_VAR_deploy_runner_ip=$RUNNER_IP" >> "$GITHUB_ENV"
+          STORAGE_ACCOUNT_NAME=$(terraform output -raw storage_account_name 2>/dev/null || echo "")
+          if [ -z "$STORAGE_ACCOUNT_NAME" ]; then
+            echo "Storage account not in state yet; Terraform creates it with this runner's IP allow-listed."
+            exit 0
+          fi
+          STORAGE_ACCOUNT_RG=$(az storage account show --name "$STORAGE_ACCOUNT_NAME" --query resourceGroup -o tsv --only-show-errors 2>/dev/null || echo "")
+          if [ -z "$STORAGE_ACCOUNT_RG" ]; then
+            echo "Storage account $STORAGE_ACCOUNT_NAME is in state but not in Azure; Terraform will recreate it."
+            exit 0
+          fi
+          echo "STORAGE_ACCOUNT_NAME=$STORAGE_ACCOUNT_NAME" >> "$GITHUB_ENV"
+          echo "STORAGE_ACCOUNT_RG=$STORAGE_ACCOUNT_RG" >> "$GITHUB_ENV"
+          az storage account network-rule add --account-name "$STORAGE_ACCOUNT_NAME" --resource-group "$STORAGE_ACCOUNT_RG" --ip-address "$RUNNER_IP" --only-show-errors > /dev/null
+          # Firewall rule propagation is not immediate — wait until the data
+          # plane accepts this runner before Terraform touches it.
+          for i in $(seq 1 18); do
+            if az storage container list --account-name "$STORAGE_ACCOUNT_NAME" --auth-mode key --num-results 1 --only-show-errors -o none 2>/dev/null; then
+              echo "Storage data plane reachable from runner."
+              break
+            fi
+            if [ "$i" = "18" ]; then
+              echo "::warning::Storage account $STORAGE_ACCOUNT_NAME data plane still unreachable after ~3 minutes."
+            else
+              sleep 10
+            fi
+          done
+
       - name: Terraform drift plan (workload)
         working-directory: infra/terraform/environments/prod/workload
         # Secrets passed via TF_VAR_* env so they never appear in the process
@@ -235,4 +279,23 @@ jobs:
           RUNNER_IP=$(curl -s https://api.ipify.org || echo "")
           if [ -n "$RUNNER_IP" ]; then
             az keyvault network-rule remove --name "$KEY_VAULT_NAME" --resource-group "$WORKLOAD_RG" --ip-address "$RUNNER_IP" --only-show-errors >/dev/null 2>&1 || true
+          fi
+
+      - name: Remove Runner IP from storage account
+        if: always()
+        working-directory: infra/terraform/environments/prod/workload
+        run: |
+          NAME="${STORAGE_ACCOUNT_NAME:-}"
+          RG="${STORAGE_ACCOUNT_RG:-}"
+          if [ -z "$NAME" ]; then
+            # First apply of an environment: the account was created during this
+            # run with the runner IP baked into ip_rules — resolve it from state.
+            NAME=$(terraform output -raw storage_account_name 2>/dev/null || echo "")
+            if [ -n "$NAME" ]; then
+              RG=$(az storage account show --name "$NAME" --query resourceGroup -o tsv --only-show-errors 2>/dev/null || echo "")
+            fi
+          fi
+          RUNNER_IP=$(curl -s https://api.ipify.org || echo "")
+          if [ -n "$NAME" ] && [ -n "$RG" ] && [ -n "$RUNNER_IP" ]; then
+            az storage account network-rule remove --account-name "$NAME" --resource-group "$RG" --ip-address "$RUNNER_IP" --only-show-errors >/dev/null 2>&1 || true
           fi

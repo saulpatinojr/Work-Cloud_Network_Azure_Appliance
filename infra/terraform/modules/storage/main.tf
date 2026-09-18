@@ -40,12 +40,16 @@ resource "azurerm_storage_account" "this" {
   # working. public_network_access_enabled stays true because Terraform apply and
   # the static-website bootstrap need a data-plane window, but leaving
   # default_action at its implicit "Allow" exposed the account to every source IP
-  # on the internet. The deploy/drift workflows add and remove the transient
-  # runner IP the same way they do for the Key Vault (identity module), so that
-  # ephemeral ip_rules entry must not fight Terraform.
+  # on the internet. The 210 deploy, 320 publish and 350/360 drift workflows add
+  # and remove the transient runner IP the same way they do for the Key Vault
+  # (identity module), so that ephemeral ip_rules entry must not fight Terraform.
+  # On the very first apply the account does not exist for a workflow to open,
+  # so the runner IP is passed in as bootstrap_ip_rules and created with the
+  # account; ignore_changes below makes that a creation-time value only.
   network_rules {
     bypass         = ["AzureServices"]
     default_action = "Deny"
+    ip_rules       = var.bootstrap_ip_rules
   }
 
   lifecycle {
