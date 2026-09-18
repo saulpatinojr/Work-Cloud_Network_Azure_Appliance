@@ -56,7 +56,7 @@ jobs:
   # ── Safety gate ──────────────────────────────────────────────────────────────
   preflight:
     name: Preflight safety check
-    runs-on: self-hosted
+    runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
       - name: Validate confirmation string
@@ -78,7 +78,7 @@ jobs:
   # ── Terraform destroy ────────────────────────────────────────────────────────
   terraform-destroy:
     name: "terraform destroy (${{ github.event.inputs.environment }})"
-    runs-on: self-hosted
+    runs-on: ubuntu-latest
     timeout-minutes: 60
     needs: preflight
     environment: ${{ github.event.inputs.environment }}
@@ -163,7 +163,7 @@ jobs:
   # ── Clean up drifted resources not in Terraform state ────────────────────────
   cleanup-drift:
     name: "Remove drifted resources (${{ github.event.inputs.environment }})"
-    runs-on: self-hosted
+    runs-on: ubuntu-latest
     timeout-minutes: 30
     needs: terraform-destroy
     # Non-blocking: the StaleAi targets all live inside the workload RG, which the
@@ -225,7 +225,7 @@ jobs:
   # reach — only the Main SP (subscription Contributor) can.
   purge-soft-deleted:
     name: "Purge soft-deleted AI accounts (${{ github.event.inputs.environment }})"
-    runs-on: self-hosted
+    runs-on: ubuntu-latest
     timeout-minutes: 30
     needs: terraform-destroy
     # Best-effort: the RG delete is async and can outlast the poll window below.
@@ -277,7 +277,7 @@ jobs:
   # ── Optional: wipe TF state backend ─────────────────────────────────────────
   destroy-backend:
     name: "Destroy TF state backend RG"
-    runs-on: self-hosted
+    runs-on: ubuntu-latest
     timeout-minutes: 20
     needs: cleanup-drift
     if: github.event.inputs.destroy_tfstate_backend == 'true'

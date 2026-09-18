@@ -25,7 +25,7 @@ env:
 
 jobs:
   drift-detection:
-    runs-on: self-hosted
+    runs-on: ubuntu-latest
     timeout-minutes: 20
     environment: dev
     steps:
@@ -82,8 +82,8 @@ jobs:
             -backend-config="use_oidc=true"
 
       # Key Vault is deny-by-default (default_action = Deny). The workload drift
-      # plan refreshes KV secret resources over the data plane, so the self-hosted
-      # runner's IP must be allow-listed first (removed again at the end).
+      # plan refreshes KV secret resources over the data plane, so the runner's
+      # public IP must be allow-listed first (removed again at the end).
       - name: Ensure Key Vault is reachable during drift plan
         env:
           REGION_SHORT: ${{ vars.AZURE_REGION_SHORT }}

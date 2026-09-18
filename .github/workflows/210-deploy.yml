@@ -138,7 +138,7 @@ env:
 jobs:
   policy-gates:
     if: inputs.environment != ''
-    runs-on: self-hosted
+    runs-on: ubuntu-latest
     timeout-minutes: 15
     outputs:
       manage_diagnostic_settings: ${{ steps.alz_diag.outputs.manage_diagnostic_settings }}
@@ -284,9 +284,9 @@ jobs:
         run: |
           # Resolve the checkov entrypoint from its pipx venv directly, independent
           # of PATH. pipx installs into $PIPX_HOME (default ~/.local/share/pipx) and
-          # symlinks to $PIPX_BIN_DIR (default ~/.local/bin) which is not on the
-          # self-hosted runner's non-login-shell PATH. Querying pipx for the venv
-          # path avoids hardcoding $HOME and works no matter who the runner user is.
+          # symlinks to $PIPX_BIN_DIR (default ~/.local/bin), which is on PATH on
+          # GitHub-hosted runners but not on every runner image. Querying pipx for
+          # the venv path avoids hardcoding $HOME and works whoever the runner user is.
           pipx install checkov --force --quiet
           PIPX_BIN_DIR="$(pipx environment --value PIPX_BIN_DIR 2>/dev/null || echo "$HOME/.local/bin")"
           CHECKOV="$PIPX_BIN_DIR/checkov"
@@ -320,7 +320,7 @@ jobs:
 
   plan:
     if: inputs.environment != ''
-    runs-on: self-hosted
+    runs-on: ubuntu-latest
     timeout-minutes: 30
     needs: policy-gates
     environment: ${{ inputs.environment }}
@@ -710,7 +710,7 @@ jobs:
 
   apply:
     if: inputs.environment != ''
-    runs-on: self-hosted
+    runs-on: ubuntu-latest
     timeout-minutes: 60
     needs: plan
     # Prod apply runs under the 'hub' environment, which has a required-reviewer
@@ -773,9 +773,9 @@ jobs:
           esac
 
       # The DB-migration and revision-restart steps below use `az containerapp job`,
-      # which lives in the containerapp CLI extension (NOT in core az). The runner
-      # bootstrap pre-installs it, but add it here defensively so the deploy never
-      # dies mid-apply with "unrecognized arguments: job" if the runner drifts.
+      # which lives in the containerapp CLI extension (NOT in core az). GitHub-hosted
+      # runners ship the Azure CLI without it, so install it here every run; the
+      # deploy must never die mid-apply with "unrecognized arguments: job".
       - name: Ensure az containerapp extension
         run: |
           az config set extension.use_dynamic_install=yes_without_prompt --only-show-errors
@@ -1331,7 +1331,7 @@ jobs:
 
   verify:
     if: inputs.environment != ''
-    runs-on: self-hosted
+    runs-on: ubuntu-latest
     timeout-minutes: 20
     needs: apply
     environment: ${{ inputs.environment }}
