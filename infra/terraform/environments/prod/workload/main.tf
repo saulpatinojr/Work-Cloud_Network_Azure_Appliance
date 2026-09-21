@@ -44,6 +44,11 @@ module "storage" {
   replication_type            = "GZRS"
   raw_artifact_retention_days = 30 # move to Cool after 30 days, auto-delete after 365
   deliverable_retention_days  = 90
+
+  # First-apply only (ignore_changes afterwards): the deploy runner's public IP,
+  # so the static website can be provisioned over the data plane in the same
+  # apply that creates the deny-by-default account. Set by 210-deploy.
+  bootstrap_ip_rules = var.deploy_runner_ip != "" ? [var.deploy_runner_ip] : []
 }
 
 module "identity" {
@@ -143,6 +148,7 @@ module "compute" {
     },
     local.azure_ai_env_vars,
     local.ai_mode_env_vars,
+    local.image_update_env_vars,
   )
 
   # ── Secret-backed env vars (reference Container App secrets by name) ─────────
@@ -155,7 +161,9 @@ module "compute" {
       AZURE_AD_CLIENT_SECRET    = "entra-client-secret"
       CREDENTIAL_ENCRYPTION_KEY = "credential-encryption-key"
     },
-    var.local_admin_password != null ? { LOCAL_ADMIN_PASSWORD = "local-admin-password" } : {}
+    var.local_admin_password != null ? { LOCAL_ADMIN_PASSWORD = "local-admin-password" } : {},
+    # Same Container App secret the registry block pulls with (compute module).
+    local.use_registry_credentials ? { CNA_IMAGE_REGISTRY_TOKEN = "container-registry-password" } : {},
   )
 
   # cna-api needs DATABASE_URL to read/write discovery jobs and findings. In

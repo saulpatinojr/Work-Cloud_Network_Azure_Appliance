@@ -28,7 +28,7 @@ concurrency:
 
 jobs:
   sync-env:
-    runs-on: self-hosted
+    runs-on: ubuntu-latest
     timeout-minutes: 15
     environment: ${{ inputs.environment }}
     steps:
@@ -38,6 +38,41 @@ jobs:
           client-id: ${{ secrets.AZURE_CLIENT_ID }}
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      # Key Vault is deny-by-default (default_action = Deny, identity module).
+      # The two steps below read secrets over the data plane, so the runner's
+      # public IP is allow-listed first and removed again at the end — the same
+      # window 210-deploy and the 350/360 drift workflows open. The vault's
+      # resource group is resolved from the vault itself; KEY_VAULT_NAME is
+      # repo-level and Terraform writes the environment's real (suffixed) name.
+      - name: Ensure Key Vault is reachable from this runner
+        run: |
+          VAULT="${{ vars.KEY_VAULT_NAME }}"
+          if [ -z "$VAULT" ]; then
+            echo "::error::KEY_VAULT_NAME variable is not set; run 210 · Deploy first."
+            exit 1
+          fi
+          VAULT_RG=$(az keyvault show --name "$VAULT" --query resourceGroup -o tsv --only-show-errors)
+          echo "KEY_VAULT_RG=$VAULT_RG" >> "$GITHUB_ENV"
+          RUNNER_IP=$(curl -s https://api.ipify.org || echo "")
+          if [ -z "$RUNNER_IP" ]; then
+            echo "::warning::Could not determine the runner's public IP; Key Vault reads may 403 (ForbiddenByFirewall)."
+            exit 0
+          fi
+          az keyvault network-rule add --name "$VAULT" --resource-group "$VAULT_RG" --ip-address "$RUNNER_IP" --only-show-errors > /dev/null
+          # Firewall rule propagation is not immediate — wait until the data
+          # plane accepts this runner before reading secrets.
+          for i in $(seq 1 18); do
+            if az keyvault secret list --vault-name "$VAULT" --maxresults 1 --only-show-errors -o none 2>/dev/null; then
+              echo "Key Vault data plane reachable from runner."
+              break
+            fi
+            if [ "$i" = "18" ]; then
+              echo "::warning::Key Vault $VAULT data plane still unreachable after ~3 minutes."
+            else
+              sleep 10
+            fi
+          done
 
       - name: Validate required Key Vault secrets exist
         run: |
@@ -113,6 +148,18 @@ jobs:
           EOF
 
           echo "Generated .env.${{ inputs.environment }}"
+
+      - name: Remove Runner IP from Key Vault
+        if: always()
+        run: |
+          VAULT="${{ vars.KEY_VAULT_NAME }}"
+          if [ -z "$VAULT" ] || [ -z "${KEY_VAULT_RG:-}" ]; then
+            exit 0
+          fi
+          RUNNER_IP=$(curl -s https://api.ipify.org || echo "")
+          if [ -n "$RUNNER_IP" ]; then
+            az keyvault network-rule remove --name "$VAULT" --resource-group "$KEY_VAULT_RG" --ip-address "$RUNNER_IP" --only-show-errors >/dev/null 2>&1 || true
+          fi
 
       - name: Upload .env artifact (1-day retention)
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

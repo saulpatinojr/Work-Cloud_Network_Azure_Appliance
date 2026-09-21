@@ -7,7 +7,7 @@ that belongs to a named owner outside the engineering task itself.
 Anything an engineer can solve without external input belongs in [`TODO.md`](TODO.md), not here.
 Application-level blockers live in the core repository's `REVIEW.md`.
 
-**Last reviewed:** 2026-09-15
+**Last reviewed:** 2026-09-18
 
 | ID | Blocker | Owner | Status |
 |---|---|---|---|
@@ -16,6 +16,7 @@ Application-level blockers live in the core repository's `REVIEW.md`.
 
 | [R-003](#r-003--live-azure-beta-acceptance-sign-off) | 0.8 beta exit — live Azure acceptance sign-off | Product owner | Open — deploy done 2026-08-28, acceptance outstanding |
 | [R-004](#r-004--the-dev-environment-has-no-protection-against-out-of-band-deletion) | Dev environment deleted out of band; no protection against a repeat | Azure subscription owner | Open |
+| [R-005](#r-005--repoint-core_repo-at-the-new-core-repository) | Set `CORE_REPO` to `Work-Cloud_Network_Core` once the core repository is live | Repository admin | Open — until then `230` polls the archived repository |
 ---
 
 ## R-001 — Security review before the first `byo-api` deploy
@@ -157,3 +158,37 @@ Ask the sandbox administrator the one question that decides everything else: is
 `sub-cbtssandbox-ops-tst` swept on a schedule, and can these two resource groups be excluded?
 
 ---
+
+---
+
+## R-005 — Repoint `CORE_REPO` at the new core repository
+
+**Problem**
+The core moved from `Work-Cloud_Network_Assessment` to `Work-Cloud_Network_Core` (core `TODO.md`
+T-509). `230-image-update` reads the build manifest from the repository named by the `CORE_REPO`
+variable through the GitHub App; while the variable still names the original repository, this
+appliance keeps polling a manifest that will never change again, and the dispatch from the new
+core's `200-build-images` reaches this repository only if the App is installed on the new core.
+
+**Why it needs an owner**
+Repository variables and GitHub App installations are settings only the repository admin can write.
+
+**Required owner**
+Repository admin.
+
+**Required action**
+1. Wait until the core's `REVIEW.md` R-013 steps 1 – 4 are done (secrets and variables, App
+   installation, and the first `200` run on `Work-Cloud_Network_Core`).
+2. *Settings → Secrets and variables → Actions → Variables*: set `CORE_REPO` to `Work-Cloud_Network_Core`.
+3. Run `230 · Image Update` once from *Run workflow* (`force: false`) and confirm the *Fetch the
+   manifest* step reads from the new repository.
+4. Do the same in the sibling appliance.
+
+**Impact if unresolved**
+No new image set ever reaches this appliance: `dev` stops auto-updating and no `update-available`
+issue is opened for `prod`.
+
+**References**
+- `.github/workflows/230-image-update.yml` (`vars.CORE_REPO`)
+- `README.md` → *Configuration*
+- Core `REVIEW.md` R-013 / `TODO.md` T-509

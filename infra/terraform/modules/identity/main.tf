@@ -10,7 +10,7 @@ resource "azurerm_user_assigned_identity" "this" {
 
 resource "azurerm_key_vault" "this" {
   #checkov:skip=CKV2_AZURE_32:Private endpoint is created in the security module and wired to this vault through its resource ID.
-  #checkov:skip=CKV_AZURE_189:public_network_access stays enabled so the self-hosted deploy runner can write secrets through a temporary, deny-by-default firewall window (211 + drift workflows add/remove the runner IP). Literal public-access-disabled (PE-only) requires a VNet-joined runner — tracked separately. See docs/adr/0004.
+  #checkov:skip=CKV_AZURE_189:public_network_access stays enabled so the GitHub-hosted deploy runner can write secrets through a temporary, deny-by-default firewall window (210, 340 and the drift workflows add/remove the runner IP). Literal public-access-disabled (PE-only) requires a VNet-joined runner — tracked separately. See docs/adr/0004.
   name                          = local.key_vault_name
   location                      = var.location
   resource_group_name           = var.resource_group_name
@@ -23,8 +23,8 @@ resource "azurerm_key_vault" "this" {
 
   # Deny-by-default firewall. Data-plane access is over the private endpoint
   # (apps, via managed identity) plus a temporary runner-IP allow-rule that the
-  # 211 deploy and the 350/360 drift workflows add before Terraform touches
-  # secrets and remove afterwards. AzureServices bypass covers the Front Door
+  # 210 deploy, 340 sync-keys and the 350/360 drift workflows add before they
+  # touch secrets and remove afterwards. AzureServices bypass covers the Front Door
   # certificate path.
   network_acls {
     bypass         = "AzureServices"

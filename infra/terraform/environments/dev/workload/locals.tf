@@ -8,6 +8,20 @@ locals {
     ManagedBy   = "terraform"
   }
 
+  # Registry pull credential — the Container Apps pull with it and the web tier
+  # reuses the same secret (read-only) for its image-update check. Mirrors the
+  # compute module's own condition.
+  use_registry_credentials = nonsensitive(var.container_registry_username != "" && var.container_registry_password != "")
+
+  # Image-update check contract (apps/cna-web/lib/image-update.ts): the web
+  # tier compares its baked build SHA with the newest published build under the
+  # image's floating tag and links to this repository's 230/210 workflows.
+  image_update_env_vars = {
+    CNA_WEB_IMAGE               = var.web_image
+    CNA_IMAGE_REGISTRY_USERNAME = var.container_registry_username
+    CNA_APPLIANCE_REPO          = "${var.github_owner}/${var.github_repository}"
+  }
+
   # ── AI mode ─────────────────────────────────────────────────────────────────
   ai_saas = var.ai_mode == "saas"
 
