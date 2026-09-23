@@ -52,7 +52,19 @@ in [`REVIEW.md`](REVIEW.md), not here. Completed work is recorded in [`CHANGELOG
   last check no environment was deployed, so this is a no-op for the initial rollout.
 - **Recommended action:** Follow the runbook below before the next apply in any affected
   environment. Run it **once per environment** (dev, then prod).
-- **Status:** Not started — not currently applicable.
+- **Status:** Done (2026-09-23) — **not applicable to any existing environment, verified.** The
+  move landed in the core on 2026-06-28 (core commit `756fb529`, "move Log Analytics workspace to
+  platform"). The only deployed environment, dev, was rebuilt from nothing on 2026-08-28 (release
+  catalog `33169632082.json`, core commit `3245c254`), and at that commit the platform root already
+  declared `azurerm_log_analytics_workspace.platform` while the workload root read it through
+  `data.azurerm_log_analytics_workspace.platform` — so dev's workspace has lived in platform state
+  from its first apply. Prod has never been deployed. No state migration is pending anywhere; the
+  runbook below is kept for an environment that might one day be restored from a pre-2026-06-28
+  state backup. Its step 4 ("stop if the workload plan wants to destroy the workspace") is now
+  automatic: `210`'s apply job refuses, right before each apply, any platform or workload plan
+  that would delete or replace the Log Analytics workspace or the PostgreSQL server
+  (`scripts/ci/refuse_destructive_plan.py`, `PROTECTED_RESOURCE_TYPES`). Mirrored in the AWS
+  appliance for CloudWatch log groups and the RDS instance.
 - **Notes for future engineers:**
 
   **Why the workspace moved.** The workspace used to be created by the `compute` module, which
