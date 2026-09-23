@@ -26,7 +26,27 @@ in [`REVIEW.md`](REVIEW.md), not here. Completed work is recorded in [`CHANGELOG
   `CNA_AI_ENGINE_DEFAULT`) — no create, no destroy.
 - **Recommended action:** Run `210-deploy` for dev in `saas` mode, stop at the plan artifact, and
   read it line by line before approving. A destroy of `module.ai` means a `moved` block is missing.
-- **Status:** Open
+- **Status:** Static half done (2026-09-23); the live plan read is still owed and is the only
+  step left. Dev was last applied from core commit `3245c254` (release catalog `33169632082`).
+  Against that commit: every resource that gained `count` — `module.ai`, the four
+  `azurerm_role_assignment.*_foundry_user`, `module.security.azurerm_private_endpoint.foundry` —
+  has a `moved` block to its `[0]` address (six in total, the private endpoint's inside the
+  security module), and the resource inventory of the workload root and all eight modules is
+  otherwise **identical**, so nothing can legitimately be created or destroyed. The platform plan
+  must be empty (only the module source paths changed). The workload plan must show exactly:
+  the six `moved` annotations; in-place env updates on `ca-api` and `ca-worker` adding
+  `CNA_AI_MODE`, `CNA_APPLIANCE_CLOUD`, `CNA_AI_ENGINE_DEFAULT`; on `ca-web` adding
+  `CNA_AI_MODE`, `CNA_APPLIANCE_CLOUD`, `CNA_WEB_IMAGE`, `CNA_IMAGE_REGISTRY_USERNAME`,
+  `CNA_APPLIANCE_REPO` and the secret-backed `CNA_IMAGE_REGISTRY_TOKEN` (from the existing
+  `container-registry-password` secret — no new secret); the image references, if the build
+  manifest has moved on; `cna-api` additionally gains `CREDENTIAL_ENCRYPTION_KEY` only in
+  `byo-api`, so nothing in `saas`; and possibly an in-place `network_rules` update on the storage
+  account, whose `Deny` default and `AzureServices` bypass are now declared in the module (its
+  `ip_rules` are ignored). Anything else — any `create`, any `destroy`, any `replace` — is a
+  finding. The destroy half is now enforced, not just read: `210`'s apply job refuses a plan that
+  would delete or replace the Foundry account or its model deployment (and the storage account),
+  on top of the T-103 log-store and database guard, so a missing `moved` block can no longer reach
+  `apply`. Close this item when the first `210` dev run after these merges shows the plan above.
 
 ### T-102 — Add this repository to the shared project board
 
