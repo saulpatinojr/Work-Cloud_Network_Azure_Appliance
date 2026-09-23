@@ -157,7 +157,21 @@ in [`REVIEW.md`](REVIEW.md), not here. Completed work is recorded in [`CHANGELOG
   "the least-proven infra" for unrelated reasons (the dev account was renamed `-aif2` after a
   soft-delete collision). Two independent signals pointing at the same untested path is the
   argument for closing this one properly rather than deleting the markers.
-- **Status:** Open.
+- **Status:** Done (2026-09-23) — option 1, the markers are automatable. `210`'s apply job gains
+  "Verify the AI Foundry path from inside the environment" (`saas` only): a one-off Container Apps
+  Job in the same environment, with the same user-assigned identity and the same api image as
+  `cna-api`, runs `scripts/ci/probe_foundry_path.py`, which resolves the Foundry host from inside
+  the VNet (the answer must fall in the private-endpoint subnet) and makes one managed-identity
+  chat completion against the deployment the api is configured with — the exact call path the
+  `azure-openai` engine uses. The two verdicts reach the manifest through
+  `update_apply_evidence.py` (`AI_PATH_CHECKS`), and `evaluate_deployment_evidence.py` now refuses
+  to report `healthy` while *any* validation check is not `passed` / `not_applicable` — `required`,
+  `pending`, `failed` and `unverified` all block, so the manifest can never again say healthy about
+  a path nobody exercised. The checklist item in `REVIEW.md` → the acceptance run now reads the
+  two markers as machine results. Shared parts (the two evidence scripts) and the AWS twin (the
+  `bedrock_*` markers, verified by a one-off Fargate task) landed in the sibling in the same change
+  set. Not yet exercised against the live dev environment: the first `210` run after merge is the
+  proof, and if it fails, the manifest will say so instead of `healthy`.
 
 ### T-105 — A scheduled drift check failed daily for five weeks and nothing surfaced it
 
