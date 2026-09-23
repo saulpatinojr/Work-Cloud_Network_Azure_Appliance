@@ -182,7 +182,10 @@ in [`REVIEW.md`](REVIEW.md), not here. Completed work is recorded in [`CHANGELOG
   distinguish "resources drifted" from "the environment does not exist", and treat the second as
   a distinct, louder failure — those mean very different things.
 - **Notes for future engineers:** Do not close this by muting the check or by making it tolerate
-  a missing backend. The check was right; the delivery was missing.
+  a missing backend. The check was right; the delivery was missing. One adjacent gap is closed
+  (2026-09-23): the plan step read any non-zero exit other than 2 as "no drift", so a plan that
+  *errored* passed silently; `350`/`360` now fail on it (see `CHANGELOG.md`). The notification
+  destination this item asks for is still missing.
 - **Status:** Open.
 
 ### T-106 — Terraform findings imported from the core's production-readiness review

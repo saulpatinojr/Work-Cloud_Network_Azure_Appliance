@@ -65,9 +65,15 @@ jobs:
         working-directory: infra/terraform/environments/dev/platform
         run: |
           AI_MODE=$(jq -r '.ai_mode // "saas"' "$GITHUB_WORKSPACE/.deployment-catalog/dev/latest.json" 2>/dev/null || echo saas)
+          # -detailed-exitcode: 0 = clean, 2 = drift (warn), anything else = the
+          # plan itself failed and must fail the job, never be read as "no drift".
+          EXIT=0
           terraform plan -detailed-exitcode -var="ai_mode=${AI_MODE:-saas}" || EXIT=$?
-          if [ "${EXIT:-0}" -eq 2 ]; then
+          if [ "$EXIT" -eq 2 ]; then
             echo "::warning::Drift detected in dev/platform state."
+          elif [ "$EXIT" -ne 0 ]; then
+            echo "::error::terraform plan failed for dev/platform (exit $EXIT)."
+            exit "$EXIT"
           fi
 
       # ── Workload state drift ────────────────────────────────────────────────
@@ -253,6 +259,9 @@ jobs:
             || EXIT=$?
           if [ "${EXIT:-0}" -eq 2 ]; then
             echo "::warning::Drift detected in dev/workload state."
+          elif [ "${EXIT:-0}" -ne 0 ]; then
+            echo "::error::terraform plan failed for dev/workload (exit $EXIT)."
+            exit "$EXIT"
           fi
 
       - name: Remove Runner IP from Key Vault
