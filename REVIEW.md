@@ -83,9 +83,12 @@ Product owner (with the AWS/Azure account owners for the deploy windows).
 2. **Review the deployment evidence artifacts produced by the workflow run.** These now exist:
    `.deployment-catalog/dev/33169632082.json` records `health_status: healthy`, 100% origin
    health, and passing canary, staged-promotion, certificate and private-endpoint checks.
-   **Read the two `required` markers before accepting** — `foundry_private_dns_validation` and
-   `foundry_managed_identity_inference` are never set by any workflow step, so a `healthy`
-   verdict does not cover the AI Foundry / Copilot path (`TODO.md` → T-104).
+   **Check the two Foundry markers read `passed`** — since `TODO.md` → T-104 (2026-09-23),
+   `foundry_private_dns_validation` and `foundry_managed_identity_inference` are set by `210`
+   itself from a probe run inside the environment, and a run cannot reach `healthy` (or the
+   catalog) while either is anything else. The `33169632082` entry predates that and still
+   carries them as `required`: its `healthy` verdict does not cover the AI Foundry / Copilot path,
+   so accept against a `210` run made after the change.
 3. Accept or reject the customer-like beta acceptance run, and record the decision.
    Note the acceptance run has not happened yet: the rebuilt environment has an empty database,
    so there is no discovery, finding, or deliverable in it to accept against.

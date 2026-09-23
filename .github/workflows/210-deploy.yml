@@ -581,7 +581,7 @@ jobs:
 
       - name: Generate GitHub App Token
         id: app-token
-        uses: actions/create-github-app-token@v3
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1  # v3.2.0
         with:
           client-id: ${{ secrets.GH_APP_ID }}
           private-key: ${{ secrets.GH_APP_PRIVATE_KEY }}
@@ -982,7 +982,7 @@ jobs:
 
       - name: Generate GitHub App Token
         id: app-token
-        uses: actions/create-github-app-token@v3
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1  # v3.2.0
         with:
           client-id: ${{ secrets.GH_APP_ID }}
           private-key: ${{ secrets.GH_APP_PRIVATE_KEY }}
@@ -991,6 +991,17 @@ jobs:
       # Applying a saved plan file (-out=tfplan) re-uses the variable values captured
       # at plan time, so no -var / TF_VAR_* are passed here — Terraform rejects vars
       # when applying a saved plan. Platform first (networking), then workload.
+      # A release must never delete or replace the Log Analytics workspace or the PostgreSQL server: that is
+      # exactly what a stale state layout would do (TODO.md T-103), and it
+      # deletes history no re-apply brings back. Both saved plans are checked
+      # right before they are applied; a human fixes state (state rm / import)
+      # or knowingly lifts the guard for one run.
+      - name: Refuse a platform plan that destroys protected data
+        env:
+          PROTECTED_RESOURCE_TYPES: azurerm_log_analytics_workspace,azurerm_postgresql_flexible_server
+          PLAN_LABEL: ${{ inputs.environment }}/platform
+        run: terraform show -json tfplan | python3 "$GITHUB_WORKSPACE/scripts/ci/refuse_destructive_plan.py"
+
       - name: Terraform apply (platform)
         run: terraform apply -auto-approve tfplan
 
@@ -1056,6 +1067,13 @@ jobs:
             -var="foundry_project_endpoint=${FOUNDRY_PROJECT_ENDPOINT}" \
             -var="foundry_recommendation_agent_id=${FOUNDRY_RECOMMENDATION_AGENT_ID}" \
             -var="secret_expiration_date=${SECRET_EXPIRY}"
+
+      - name: Refuse a workload plan that destroys protected data
+        working-directory: infra/terraform/environments/${{ inputs.environment }}/workload
+        env:
+          PROTECTED_RESOURCE_TYPES: azurerm_log_analytics_workspace,azurerm_postgresql_flexible_server
+          PLAN_LABEL: ${{ inputs.environment }}/workload
+        run: terraform show -json tfplan | python3 "$GITHUB_WORKSPACE/scripts/ci/refuse_destructive_plan.py"
 
       - name: Terraform apply (workload)
         id: tf_apply
@@ -1163,6 +1181,11 @@ jobs:
 
       - name: Run database migrations
         working-directory: infra/terraform/environments/${{ inputs.environment }}/workload
+        # The connectivity probe's job manifest pulls the migrator image with these;
+        # they were referenced but never defined, so the (best-effort) probe never ran.
+        env:
+          DOCKERHUB_USERNAME: ${{ vars.DOCKERHUB_NAMESPACE }}
+          DOCKERHUB_PASSWORD: ${{ secrets.DOCKERHUB_TOKEN }}
         run: |
           DB_URL=$(terraform output -raw database_connection_string)
           # Empty when the break-glass local admin secret hasn't been bootstrapped
@@ -1386,9 +1409,156 @@ jobs:
         with:
           python-version: "3.12"
 
+      # The two AI Foundry markers in the manifest ("foundry_private_dns_validation",
+      # "foundry_managed_identity_inference") were hardcoded `required` and nothing
+      # ever flipped them, so a green run reported healthy on a path nobody had
+      # exercised (TODO.md T-104). This step exercises it: a one-off Container
+      # Apps Job in the same environment, with the same user-assigned identity and
+      # the same api image as cna-api, runs scripts/ci/probe_foundry_path.py — it
+      # resolves the Foundry host from inside the VNet (the answer must fall in the
+      # private-endpoint subnet) and makes one managed-identity chat completion
+      # against the deployment the api is configured with. The verdicts reach the
+      # manifest through "Update apply evidence"; the verify job's evaluator then
+      # refuses to call the deployment healthy unless both passed. This step never
+      # fails the apply itself — the evidence is the verdict.
+      - name: Verify the AI Foundry path from inside the environment
+        id: ai_path
+        if: inputs.ai_mode == 'saas'
+        working-directory: infra/terraform/environments/${{ inputs.environment }}/workload
+        env:
+          DOCKERHUB_USERNAME: ${{ vars.DOCKERHUB_NAMESPACE }}
+          DOCKERHUB_PASSWORD: ${{ secrets.DOCKERHUB_TOKEN }}
+        run: |
+          RG="${{ steps.export_ids.outputs.resource_group_name }}"
+          CAE_ID="${{ steps.export_ids.outputs.container_app_environment_id }}"
+          PE_PREFIX="${{ steps.export_ids.outputs.private_endpoint_subnet_prefix }}"
+          WEB_APP="${{ steps.export_ids.outputs.web_container_app_name }}"
+          API_APP="${WEB_APP/-ca-web/-ca-api}"
+          IDENTITY_ID=$(terraform output -raw managed_identity_id)
+          CLIENT_ID=$(terraform output -raw managed_identity_client_id)
+          DNS="failed"
+          INFER="failed"
+          record() {
+            printf 'ai_path_checks={"foundry_private_dns_validation":"%s","foundry_managed_identity_inference":"%s"}\n' "$DNS" "$INFER" >> "$GITHUB_OUTPUT"
+            echo "AI Foundry path: private DNS = $DNS, managed-identity inference = $INFER"
+            if [ "$DNS" != "passed" ] || [ "$INFER" != "passed" ]; then
+              echo "::error::The AI Foundry path did not verify (private DNS = $DNS, inference = $INFER); the verify job will not report this deployment healthy."
+            fi
+          }
+          # Test what the api is actually configured with, not the repository variables.
+          api_env() {
+            az containerapp show --name "$API_APP" --resource-group "$RG" \
+              --query "properties.template.containers[0].env[?name=='$1'].value | [0]" -o tsv 2>/dev/null || echo ""
+          }
+          ENDPOINT=$(api_env AZURE_OPENAI_ENDPOINT)
+          DEPLOYMENT=$(api_env AZURE_OPENAI_DEPLOYMENT)
+          API_VERSION=$(api_env AZURE_OPENAI_API_VERSION)
+          if [ -z "$ENDPOINT" ] || [ -z "$DEPLOYMENT" ] || [ -z "$API_VERSION" ]; then
+            echo "::error::$API_APP carries no AZURE_OPENAI_ENDPOINT / AZURE_OPENAI_DEPLOYMENT / AZURE_OPENAI_API_VERSION although ai_mode is saas."
+            record
+            exit 0
+          fi
+
+          JOB="job-aiprobe-${{ github.run_id }}"
+          PROBE_B64=$(base64 -w0 "$GITHUB_WORKSPACE/scripts/ci/probe_foundry_path.py")
+          # Built line-by-line like the migration probe: a heredoc would inherit
+          # this run block's indentation into the manifest's top-level keys.
+          JOB_YAML="$(mktemp)"
+          {
+            echo "identity:"
+            echo "  type: UserAssigned"
+            echo "  userAssignedIdentities:"
+            echo "    \"${IDENTITY_ID}\": {}"
+            echo "properties:"
+            echo "  environmentId: \"${CAE_ID}\""
+            echo "  configuration:"
+            echo "    triggerType: Manual"
+            echo "    replicaTimeout: 180"
+            echo "    replicaRetryLimit: 0"
+            echo "    manualTriggerConfig:"
+            echo "      replicaCompletionCount: 1"
+            echo "      parallelism: 1"
+            echo "    registries:"
+            echo "    - server: docker.io"
+            echo "      username: \"${DOCKERHUB_USERNAME}\""
+            echo "      passwordSecretRef: dockerhub-password"
+            echo "    secrets:"
+            echo "    - name: dockerhub-password"
+            echo "      value: \"${DOCKERHUB_PASSWORD}\""
+            echo "  template:"
+            echo "    containers:"
+            echo "    - image: \"${EFFECTIVE_API_IMAGE}\""
+            echo "      name: \"${JOB}\""
+            echo "      command:"
+            echo "      - /bin/sh"
+            echo "      args:"
+            echo "      - -c"
+            echo "      - 'echo \"\$PROBE_B64\" | base64 -d | python3 -'"
+            echo "      env:"
+            echo "      - name: PROBE_B64"
+            echo "        value: \"${PROBE_B64}\""
+            echo "      - name: AZURE_CLIENT_ID"
+            echo "        value: \"${CLIENT_ID}\""
+            echo "      - name: AZURE_OPENAI_ENDPOINT"
+            echo "        value: \"${ENDPOINT}\""
+            echo "      - name: AZURE_OPENAI_DEPLOYMENT"
+            echo "        value: \"${DEPLOYMENT}\""
+            echo "      - name: AZURE_OPENAI_API_VERSION"
+            echo "        value: \"${API_VERSION}\""
+            echo "      - name: CNA_PRIVATE_ENDPOINT_SUBNET_PREFIX"
+            echo "        value: \"${PE_PREFIX}\""
+            echo "      resources:"
+            echo "        cpu: 0.5"
+            echo "        memory: 1Gi"
+          } > "$JOB_YAML"
+          if ! az containerapp job create --name "$JOB" --resource-group "$RG" --yaml "$JOB_YAML" --only-show-errors > /dev/null; then
+            rm -f "$JOB_YAML"
+            echo "::error::Could not create the probe job $JOB."
+            record
+            exit 0
+          fi
+          rm -f "$JOB_YAML"
+          az containerapp job start --name "$JOB" --resource-group "$RG" --only-show-errors > /dev/null || true
+
+          STATUS="Running"
+          for i in $(seq 1 24); do
+            STATUS=$(az containerapp job execution list --name "$JOB" --resource-group "$RG" \
+              --query "[-1].properties.status" -o tsv 2>/dev/null || echo "Running")
+            case "$STATUS" in Succeeded|Failed|Stopped) break ;; esac
+            sleep 10
+          done
+          echo "Probe job status: ${STATUS:-unknown}"
+          if [ "$STATUS" = "Succeeded" ]; then
+            # The script exits 0 only when both checks passed.
+            DNS="passed"
+            INFER="passed"
+          else
+            # Read the FOUNDRY_DNS= / FOUNDRY_INFERENCE= lines back from Log Analytics,
+            # which ingests with a lag — retry for a few minutes. Whatever the log does
+            # not confirm as passed stays failed.
+            LAW_ID=$(az monitor log-analytics workspace list -g "$RG" --query '[0].customerId' -o tsv 2>/dev/null || echo "")
+            LOG=""
+            for i in $(seq 1 12); do
+              [ -z "$LAW_ID" ] && break
+              LOG=$(az monitor log-analytics query -w "$LAW_ID" \
+                --analytics-query "ContainerAppConsoleLogs_CL | where TimeGenerated > ago(15m) | where ContainerAppName_s == '${JOB}' | project Log_s" \
+                -o tsv 2>/dev/null || echo "")
+              if echo "$LOG" | grep -q 'FOUNDRY_INFERENCE='; then break; fi
+              sleep 15
+            done
+            echo "--- probe output ---"
+            echo "$LOG"
+            echo "--- end of probe output ---"
+            if echo "$LOG" | grep -q 'FOUNDRY_DNS=passed'; then DNS="passed"; fi
+            if echo "$LOG" | grep -q 'FOUNDRY_INFERENCE=passed'; then INFER="passed"; fi
+          fi
+          az containerapp job delete --name "$JOB" --resource-group "$RG" --yes --only-show-errors > /dev/null 2>&1 || true
+          record
+
       - name: Update apply evidence
         env:
           MANIFEST_PATH: ${{ github.workspace }}/.deployment-catalog/${{ inputs.environment }}/deployment-manifest.json
+          AI_PATH_CHECKS: ${{ steps.ai_path.outputs.ai_path_checks }}
           FRONTDOOR_ENDPOINT_HOST_NAME: ${{ steps.export.outputs.frontdoor_endpoint_host_name }}
           FRONTDOOR_PROFILE_ID: ${{ steps.export.outputs.frontdoor_profile_id }}
           FRONTDOOR_ENDPOINT_ID: ${{ steps.export.outputs.frontdoor_endpoint_id }}
@@ -1643,8 +1813,3 @@ jobs:
         with:
           name: deployment-provenance-${{ inputs.environment }}-${{ github.run_id }}
           path: .deployment-catalog/${{ inputs.environment }}/${{ github.run_id }}.json
-
-
-
-
-

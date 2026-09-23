@@ -52,7 +52,19 @@ in [`REVIEW.md`](REVIEW.md), not here. Completed work is recorded in [`CHANGELOG
   last check no environment was deployed, so this is a no-op for the initial rollout.
 - **Recommended action:** Follow the runbook below before the next apply in any affected
   environment. Run it **once per environment** (dev, then prod).
-- **Status:** Not started — not currently applicable.
+- **Status:** Done (2026-09-23) — **not applicable to any existing environment, verified.** The
+  move landed in the core on 2026-06-28 (core commit `756fb529`, "move Log Analytics workspace to
+  platform"). The only deployed environment, dev, was rebuilt from nothing on 2026-08-28 (release
+  catalog `33169632082.json`, core commit `3245c254`), and at that commit the platform root already
+  declared `azurerm_log_analytics_workspace.platform` while the workload root read it through
+  `data.azurerm_log_analytics_workspace.platform` — so dev's workspace has lived in platform state
+  from its first apply. Prod has never been deployed. No state migration is pending anywhere; the
+  runbook below is kept for an environment that might one day be restored from a pre-2026-06-28
+  state backup. Its step 4 ("stop if the workload plan wants to destroy the workspace") is now
+  automatic: `210`'s apply job refuses, right before each apply, any platform or workload plan
+  that would delete or replace the Log Analytics workspace or the PostgreSQL server
+  (`scripts/ci/refuse_destructive_plan.py`, `PROTECTED_RESOURCE_TYPES`). Mirrored in the AWS
+  appliance for CloudWatch log groups and the RDS instance.
 - **Notes for future engineers:**
 
   **Why the workspace moved.** The workspace used to be created by the `compute` module, which
@@ -157,7 +169,21 @@ in [`REVIEW.md`](REVIEW.md), not here. Completed work is recorded in [`CHANGELOG
   "the least-proven infra" for unrelated reasons (the dev account was renamed `-aif2` after a
   soft-delete collision). Two independent signals pointing at the same untested path is the
   argument for closing this one properly rather than deleting the markers.
-- **Status:** Open.
+- **Status:** Done (2026-09-23) — option 1, the markers are automatable. `210`'s apply job gains
+  "Verify the AI Foundry path from inside the environment" (`saas` only): a one-off Container Apps
+  Job in the same environment, with the same user-assigned identity and the same api image as
+  `cna-api`, runs `scripts/ci/probe_foundry_path.py`, which resolves the Foundry host from inside
+  the VNet (the answer must fall in the private-endpoint subnet) and makes one managed-identity
+  chat completion against the deployment the api is configured with — the exact call path the
+  `azure-openai` engine uses. The two verdicts reach the manifest through
+  `update_apply_evidence.py` (`AI_PATH_CHECKS`), and `evaluate_deployment_evidence.py` now refuses
+  to report `healthy` while *any* validation check is not `passed` / `not_applicable` — `required`,
+  `pending`, `failed` and `unverified` all block, so the manifest can never again say healthy about
+  a path nobody exercised. The checklist item in `REVIEW.md` → the acceptance run now reads the
+  two markers as machine results. Shared parts (the two evidence scripts) and the AWS twin (the
+  `bedrock_*` markers, verified by a one-off Fargate task) landed in the sibling in the same change
+  set. Not yet exercised against the live dev environment: the first `210` run after merge is the
+  proof, and if it fails, the manifest will say so instead of `healthy`.
 
 ### T-105 — A scheduled drift check failed daily for five weeks and nothing surfaced it
 
@@ -183,7 +209,16 @@ in [`REVIEW.md`](REVIEW.md), not here. Completed work is recorded in [`CHANGELOG
   a distinct, louder failure — those mean very different things.
 - **Notes for future engineers:** Do not close this by muting the check or by making it tolerate
   a missing backend. The check was right; the delivery was missing.
-- **Status:** Open.
+- **Status:** Done (2026-09-23). `350`/`360` each gain a `report-failure` job that runs when the
+  drift job fails and opens a GitHub issue — deduplicated by exact title, so a month of daily
+  failures is one issue with one comment per further failure, assigned to the repository owner
+  (unassigned if the owner is an organization, rather than not opened) — and the platform
+  `terraform init` step classifies the failure: a missing state backend or an empty state is
+  reported as **"the environment does not exist"**, its own title and message, distinct from
+  "the drift check failed" (init/plan error, expired credential, provider fault). Drift itself
+  stays a run warning, never an issue. The plan step also fails on a plan *error* instead of
+  reading it as "no drift". `370-registry-cleanup` is the core's workflow and the core's call.
+  Mirrored in the AWS appliance in the same change set.
 
 ### T-106 — Terraform findings imported from the core's production-readiness review
 
