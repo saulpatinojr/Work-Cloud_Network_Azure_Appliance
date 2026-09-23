@@ -160,6 +160,7 @@ module "compute" {
       AUTH_SECRET               = "nextauth-secret" # Auth.js v5 canonical name (was NEXTAUTH_SECRET)
       AZURE_AD_CLIENT_SECRET    = "entra-client-secret"
       CREDENTIAL_ENCRYPTION_KEY = "credential-encryption-key"
+      CNA_API_TOKEN             = "api-token" # bearer token cna-web sends to cna-api
     },
     var.local_admin_password != null ? { LOCAL_ADMIN_PASSWORD = "local-admin-password" } : {},
     # Same Container App secret the registry block pulls with (compute module).
@@ -170,7 +171,12 @@ module "compute" {
   # byo-api mode it also decrypts the admin-entered AI keys from AppSetting, so
   # it needs the same encryption key the web tier uses (secret already exists).
   api_secret_env_vars = merge(
-    { DATABASE_URL = "database-url" },
+    {
+      DATABASE_URL = "database-url"
+      # cna-api requires this bearer token on every request except /health and
+      # /ready (SEC-001/ARCH-002). cna-web presents the same token.
+      CNA_API_TOKEN = "api-token"
+    },
     local.ai_saas ? {} : { CREDENTIAL_ENCRYPTION_KEY = "credential-encryption-key" },
   )
 
@@ -185,6 +191,7 @@ module "compute" {
       "nextauth-secret"           = "${module.identity.key_vault_uri}secrets/cna-nextauth-secret"
       "entra-client-secret"       = "${module.identity.key_vault_uri}secrets/cna-entra-client-secret"
       "credential-encryption-key" = "${module.identity.key_vault_uri}secrets/cna-credential-encryption-key"
+      "api-token"                 = "${module.identity.key_vault_uri}secrets/cna-api-token"
     },
     var.local_admin_password != null ? { "local-admin-password" = "${module.identity.key_vault_uri}secrets/cna-local-admin-password" } : {}
   )
@@ -242,6 +249,15 @@ moved {
 }
 
 
+# Bearer token for the internal cna-api (SEC-001/ARCH-002). 48 chars, no special
+# characters so it is safe in an HTTP Authorization header. Generated here,
+# stored in Key Vault by module.runtime, and injected into BOTH the api and web
+# containers as CNA_API_TOKEN. Never accepted via a tfvar or a workflow input.
+resource "random_password" "api_token" {
+  length  = 48
+  special = false
+}
+
 module "runtime" {
   source                        = "../../../modules/runtime"
   resource_group_name           = data.azurerm_resource_group.this.name
@@ -252,6 +268,7 @@ module "runtime" {
   nextauth_secret               = var.nextauth_secret
   entra_client_secret           = var.entra_client_secret
   credential_encryption_key     = var.credential_encryption_key
+  api_token                     = random_password.api_token.result
   local_admin_password          = var.local_admin_password
   secret_expiration_date        = var.secret_expiration_date
 }

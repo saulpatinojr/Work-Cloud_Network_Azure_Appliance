@@ -32,7 +32,7 @@ below. If you change something here that is not on that list, change it in the s
 | Terraform module implementations (`infra/terraform/modules/*`) | Container Apps, PostgreSQL Flexible Server, Key Vault, Front Door + WAF, Azure Firewall, AI Foundry | ECS Fargate + ALB, RDS PostgreSQL, Secrets Manager, CloudFront + WAF, Bedrock |
 | Terraform state backend and `000-bootstrap-backend` inputs | `azurerm`: storage account + container (`location`, `region_short`, `tfstate_resource_group`, `tfstate_storage_account`, `tfstate_container`) | `s3` + DynamoDB lock table (`region`, `region_short`, `tfstate_bucket`, `tfstate_lock_table`) |
 | CI identity (OIDC) and its secret names | `azure/login` — `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, `AZURE_SUBSCRIPTION_ID` | `aws-actions/configure-aws-credentials` — `AWS_DEPLOY_ROLE_ARN` |
-| Runtime secret store (`340-sync-keys`) | Azure Key Vault | AWS Secrets Manager |
+| Runtime secret store | Azure Key Vault | AWS Secrets Manager |
 | Fast redeploy command (`220-fast-redeploy`) | `az containerapp update` | `aws ecs update-service` |
 | SaaS AI engine (`ai_mode: saas`) | Azure OpenAI on the AI Foundry account (`azure-openai`) | Amazon Bedrock (`bedrock`) |
 | Delivery-portal storage (`320-publish-portal`) | Azure Blob Storage (private per-engagement container, SAS access) | Amazon S3 |
@@ -69,7 +69,6 @@ Four documents plus `CLAUDE.md`; everything long-form is in the core's Wiki.
 ├── 300-validate.yml            CI for this repository: secrets scan, docs guard, terraform fmt/validate
 ├── 320-publish-portal.yml      Publish an engagement's client portal to Azure Blob Storage
 ├── 330-teardown.yml            Destroy an environment (typed confirmation required)
-├── 340-sync-keys.yml           Pull runtime secrets into a short-lived .env artifact
 ├── 350-drift-dev.yml           Daily drift detection against the dev release catalog
 ├── 360-drift-prod.yml          Drift detection for prod (manual until prod exists)
 └── 380-project-board.yml       Adds new issues and PRs to the shared project board (inert until core R-012)
@@ -139,8 +138,7 @@ Configuration comes from three places, in this order of authority:
 
 1. **GitHub Secrets and Variables** — the source of truth. Cloud credentials use OIDC; there are
    no long-lived keys. Secrets are never `workflow_dispatch` inputs and never `-var` values.
-2. **Azure Key Vault** — runtime secrets for a deployed environment (`340` pulls them into a
-   short-lived artifact).
+2. **Azure Key Vault** — runtime secrets for a deployed environment (read directly with `az keyvault secret show` under your own identity).
 3. **The app's AI Engine page** — only the bring-your-own AI API keys, only in `byo-api` mode.
 
 | Kind | Name | Purpose |

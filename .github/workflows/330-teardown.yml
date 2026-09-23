@@ -47,6 +47,9 @@ env:
   ARM_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
   ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
   DOCKERHUB_NAMESPACE: ${{ vars.DOCKERHUB_NAMESPACE }}
+  # Bind dispatch inputs to env so no run: block interpolates them into shell.
+  ENVIRONMENT: ${{ github.event.inputs.environment }}
+  CONFIRM: ${{ github.event.inputs.confirm }}
 
 concurrency:
   group: deploy-azure-platform-${{ github.event.inputs.environment }}
@@ -61,11 +64,11 @@ jobs:
     steps:
       - name: Validate confirmation string
         run: |
-          if [[ "${{ github.event.inputs.confirm }}" != "DESTROY" ]]; then
-            echo "::error::Confirmation string must be exactly 'DESTROY'. Got: '${{ github.event.inputs.confirm }}'"
+          if [[ "${CONFIRM}" != "DESTROY" ]]; then
+            echo "::error::Confirmation string must be exactly 'DESTROY'. Got: '${CONFIRM}'"
             exit 1
           fi
-          echo "Confirmation accepted. Proceeding with teardown of ${{ github.event.inputs.environment }}."
+          echo "Confirmation accepted. Proceeding with teardown of ${ENVIRONMENT}."
 
       - name: Block prod teardown on non-default branch
         if: github.event.inputs.environment == 'prod'
@@ -81,7 +84,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 60
     needs: preflight
-    environment: ${{ github.event.inputs.environment }}
+    # Prod teardown destroys every resource in the environment, so it runs under
+    # the human-gated `hub` environment (required reviewers); dev runs under dev.
+    environment: ${{ github.event.inputs.environment == 'prod' && 'hub' || github.event.inputs.environment }}
     outputs:
       workload_rg: ${{ steps.names.outputs.workload_rg }}
 
@@ -95,11 +100,13 @@ jobs:
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
       - name: Verify target subscription
+        env:
+          VAR_TARGET_SUBSCRIPTION_NAME: ${{ vars.AZURE_TARGET_SUBSCRIPTION_NAME }}
         run: |
           SUB_ID=$(az account show --query id -o tsv)
           SUB_NAME=$(az account show --query name -o tsv)
           EXPECTED_SUB_ID="${{ secrets.AZURE_SUBSCRIPTION_ID }}"
-          EXPECTED_SUB_NAME="${{ vars.AZURE_TARGET_SUBSCRIPTION_NAME }}"
+          EXPECTED_SUB_NAME="$VAR_TARGET_SUBSCRIPTION_NAME"
 
           if [[ -n "$EXPECTED_SUB_ID" && "$EXPECTED_SUB_ID" != "none" && "$EXPECTED_SUB_ID" != "$SUB_ID" ]]; then
             echo "::error::Authenticated to subscription $SUB_ID, but AZURE_SUBSCRIPTION_ID expects $EXPECTED_SUB_ID"
@@ -122,7 +129,7 @@ jobs:
           if [[ -n "$TFSTATE_RG" && "$TFSTATE_RG" == *-tfstate ]]; then
             WORKLOAD_RG="${TFSTATE_RG%-tfstate}"
           elif [[ -n "$RS" ]]; then
-            WORKLOAD_RG="rg-cna-${{ github.event.inputs.environment }}-${RS}"
+            WORKLOAD_RG="rg-cna-${ENVIRONMENT}-${RS}"
           else
             echo "::error::AZURE_REGION_SHORT is required to derive workload resource group name."
             exit 1
@@ -130,8 +137,10 @@ jobs:
           echo "workload_rg=${WORKLOAD_RG}" >> "$GITHUB_OUTPUT"
 
       - name: Delete workload resource group (async)
+        env:
+          WORKLOAD_RG: ${{ steps.names.outputs.workload_rg }}
         run: |
-          RG="${{ steps.names.outputs.workload_rg }}"
+          RG="${WORKLOAD_RG}"
           if ! az group show --name "$RG" --only-show-errors > /dev/null 2>&1; then
             echo "Resource group $RG does not exist — nothing to delete."
             exit 0
@@ -142,18 +151,21 @@ jobs:
           echo "  az group show --name $RG --query properties.provisioningState -o tsv"
 
       - name: Clear Terraform state blobs (platform + workload)
+        env:
+          VAR_TFSTATE_CONTAINER: ${{ vars.TFSTATE_CONTAINER }}
+          VAR_TFSTATE_STORAGE_ACCOUNT: ${{ vars.TFSTATE_STORAGE_ACCOUNT }}
         run: |
           # The split deploy keeps TWO state keys: <env>.terraform.tfstate
           # (platform) and <env>.workload.terraform.tfstate (workload). Both must
           # be cleared or the next deploy trips on "already exists" for resources
           # the surviving state still references.
           for KEY in \
-            "${{ github.event.inputs.environment }}.terraform.tfstate" \
-            "${{ github.event.inputs.environment }}.workload.terraform.tfstate"; do
+            "${ENVIRONMENT}.terraform.tfstate" \
+            "${ENVIRONMENT}.workload.terraform.tfstate"; do
             echo "Clearing state blob: $KEY"
             az storage blob delete \
-              --account-name "${{ vars.TFSTATE_STORAGE_ACCOUNT }}" \
-              --container-name "${{ vars.TFSTATE_CONTAINER }}" \
+              --account-name "$VAR_TFSTATE_STORAGE_ACCOUNT" \
+              --container-name "$VAR_TFSTATE_CONTAINER" \
               --name "$KEY" \
               --auth-mode login \
               --only-show-errors || true
@@ -166,6 +178,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     needs: terraform-destroy
+    # Prod drift deletion is human-gated under `hub`; dev runs under dev.
+    environment: ${{ github.event.inputs.environment == 'prod' && 'hub' || github.event.inputs.environment }}
     # Non-blocking: the StaleAi targets all live inside the workload RG, which the
     # terraform-destroy job already deletes, so this job is a best-effort sweep for
     # any out-of-RG drift. A failure here (e.g. pwsh absent, nothing to clean) must
@@ -187,10 +201,10 @@ jobs:
         run: |
           REGION_SHORT="${INPUT_REGION_SHORT:-$VAR_REGION_SHORT}"
           if [[ -z "$REGION_SHORT" ]]; then
-            echo "::error::AZURE_REGION_SHORT is required, or pass region_short when dispatching workflow 220."
+            echo "::error::AZURE_REGION_SHORT is required, or pass region_short when dispatching workflow 330."
             exit 1
           fi
-          pwsh -File ./scripts/Remove-CnaStaleAiResources.ps1 -Environment "${{ github.event.inputs.environment }}" -RegionShort "$REGION_SHORT" -Scope StaleAi
+          pwsh -File ./scripts/Remove-CnaStaleAiResources.ps1 -Environment "${ENVIRONMENT}" -RegionShort "$REGION_SHORT" -Scope StaleAi
 
       - name: Delete drifted resources (not managed by Terraform)
         if: github.event.inputs.delete_drifted_resources == 'true'
@@ -200,16 +214,16 @@ jobs:
         run: |
           REGION_SHORT="${INPUT_REGION_SHORT:-$VAR_REGION_SHORT}"
           if [[ -z "$REGION_SHORT" ]]; then
-            echo "::error::AZURE_REGION_SHORT is required, or pass region_short when dispatching workflow 220."
+            echo "::error::AZURE_REGION_SHORT is required, or pass region_short when dispatching workflow 330."
             exit 1
           fi
-          pwsh -File ./scripts/Remove-CnaStaleAiResources.ps1 -Environment "${{ github.event.inputs.environment }}" -RegionShort "$REGION_SHORT" -Scope StaleAi -Delete
+          pwsh -File ./scripts/Remove-CnaStaleAiResources.ps1 -Environment "${ENVIRONMENT}" -RegionShort "$REGION_SHORT" -Scope StaleAi -Delete
 
       - name: Require explicit rerun for drift deletion
         if: github.event.inputs.delete_drifted_resources != 'true'
         run: |
           echo "Preview complete. Review the cleanup target list above."
-          echo "Re-run workflow 220 with delete_drifted_resources=true only after approving the preview."
+          echo "Re-run workflow 330 with delete_drifted_resources=true only after approving the preview."
 
   # ── Purge soft-deleted Cognitive Services accounts ──────────────────────────
   # AIServices accounts soft-delete on RG deletion and keep their name reserved
@@ -281,6 +295,17 @@ jobs:
     timeout-minutes: 20
     needs: cleanup-drift
     if: github.event.inputs.destroy_tfstate_backend == 'true'
+    # Runs REPO-LEVEL (no `environment:`) on purpose, like purge-soft-deleted:
+    # this deletes the SEPARATE tfstate resource group + storage account, which
+    # only the repo-level Main SP (subscription Contributor) can reach — the
+    # env-scoped, RG-scoped Dev/Prod deploy SPs cannot. The prod human gate is
+    # still enforced: this job `needs: cleanup-drift → terraform-destroy`, and
+    # terraform-destroy runs under `hub` for prod, so a prod teardown cannot
+    # reach here without reviewer approval upstream.
+    # NOTE: repo-level (not an `environment:` gate) because the state backend
+    # lives in a subscription-scoped resource group outside the workload RG, which
+    # only the subscription-scoped Main SP can delete; an environment gate would
+    # switch OIDC to the RG-scoped deploy SP, which cannot.
     steps:
       - uses: azure/login@532459ea530d8321f2fb9bb10d1e0bcf23869a43
         with:
@@ -289,11 +314,13 @@ jobs:
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
       - name: Verify target subscription
+        env:
+          VAR_TARGET_SUBSCRIPTION_NAME: ${{ vars.AZURE_TARGET_SUBSCRIPTION_NAME }}
         run: |
           SUB_ID=$(az account show --query id -o tsv)
           SUB_NAME=$(az account show --query name -o tsv)
           EXPECTED_SUB_ID="${{ secrets.AZURE_SUBSCRIPTION_ID }}"
-          EXPECTED_SUB_NAME="${{ vars.AZURE_TARGET_SUBSCRIPTION_NAME }}"
+          EXPECTED_SUB_NAME="$VAR_TARGET_SUBSCRIPTION_NAME"
 
           if [[ -n "$EXPECTED_SUB_ID" && "$EXPECTED_SUB_ID" != "none" && "$EXPECTED_SUB_ID" != "$SUB_ID" ]]; then
             echo "::error::Authenticated to subscription $SUB_ID, but AZURE_SUBSCRIPTION_ID expects $EXPECTED_SUB_ID"
@@ -306,12 +333,15 @@ jobs:
           fi
 
       - name: Delete Terraform state backend resources
+        env:
+          VAR_TFSTATE_RESOURCE_GROUP: ${{ vars.TFSTATE_RESOURCE_GROUP }}
+          VAR_TFSTATE_STORAGE_ACCOUNT: ${{ vars.TFSTATE_STORAGE_ACCOUNT }}
         run: |
           echo "WARNING: Deleting Terraform state backend RG. All state will be permanently lost."
-          TF_STATE_RG="${{ vars.TFSTATE_RESOURCE_GROUP }}"
+          TF_STATE_RG="$VAR_TFSTATE_RESOURCE_GROUP"
 
           az storage account delete \
-            --name "${{ vars.TFSTATE_STORAGE_ACCOUNT }}" \
+            --name "$VAR_TFSTATE_STORAGE_ACCOUNT" \
             --resource-group "${TF_STATE_RG}" \
             --yes || true
 

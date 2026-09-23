@@ -64,6 +64,14 @@ jobs:
       ARM_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
       ARM_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
       ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+      # Bind dispatch inputs to env so no run: block interpolates ${{ inputs.* }}
+      # into shell (DEVOPS-005); steps reference the shell variables below.
+      ENVIRONMENT: ${{ inputs.environment }}
+      REGION_SHORT: ${{ inputs.region_short }}
+      INPUT_TFSTATE_RESOURCE_GROUP: ${{ inputs.tfstate_resource_group }}
+      LOCATION: ${{ inputs.location }}
+      TFSTATE_STORAGE_ACCOUNT: ${{ inputs.tfstate_storage_account }}
+      TFSTATE_CONTAINER: ${{ inputs.tfstate_container }}
     steps:
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -101,21 +109,23 @@ jobs:
 
       - name: Resolve bootstrap targets
         run: |
-          WORKLOAD_RG="rg-cna-${{ inputs.environment }}-${{ inputs.region_short }}"
-          TFSTATE_RG="${{ inputs.tfstate_resource_group }}"
+          WORKLOAD_RG="rg-cna-${ENVIRONMENT}-${REGION_SHORT}"
+          TFSTATE_RG="${INPUT_TFSTATE_RESOURCE_GROUP}"
           if [[ -z "$TFSTATE_RG" ]]; then
             TFSTATE_RG="${WORKLOAD_RG}-tfstate"
           fi
           echo "WORKLOAD_RG=$WORKLOAD_RG" >> "$GITHUB_ENV"
           echo "TFSTATE_RG=$TFSTATE_RG" >> "$GITHUB_ENV"
-          echo "TFSTATE_KEY=${{ inputs.environment }}.terraform.tfstate" >> "$GITHUB_ENV"
+          echo "TFSTATE_KEY=${ENVIRONMENT}.terraform.tfstate" >> "$GITHUB_ENV"
 
       - name: Verify target subscription
+        env:
+          VAR_TARGET_SUBSCRIPTION_NAME: ${{ vars.AZURE_TARGET_SUBSCRIPTION_NAME }}
         run: |
           SUB_ID=$(az account show --query id -o tsv)
           SUB_NAME=$(az account show --query name -o tsv)
           EXPECTED_SUB_ID="${{ secrets.AZURE_SUBSCRIPTION_ID }}"
-          EXPECTED_SUB_NAME="${{ vars.AZURE_TARGET_SUBSCRIPTION_NAME }}"
+          EXPECTED_SUB_NAME="$VAR_TARGET_SUBSCRIPTION_NAME"
 
           if [[ -n "$EXPECTED_SUB_ID" && "$EXPECTED_SUB_ID" != "none" && "$EXPECTED_SUB_ID" != "$SUB_ID" ]]; then
             echo "::error::Authenticated to subscription $SUB_ID, but AZURE_SUBSCRIPTION_ID expects $EXPECTED_SUB_ID"
@@ -143,7 +153,7 @@ jobs:
           else
             az group create \
               --name "$WORKLOAD_RG" \
-              --location "${{ inputs.location }}" \
+              --location "${LOCATION}" \
               --subscription "${{ secrets.AZURE_SUBSCRIPTION_ID }}"
           fi
 
@@ -163,7 +173,7 @@ jobs:
           else
             az group create \
               --name "$TFSTATE_RG" \
-              --location "${{ inputs.location }}" \
+              --location "${LOCATION}" \
               --subscription "${{ secrets.AZURE_SUBSCRIPTION_ID }}"
           fi
 
@@ -175,24 +185,24 @@ jobs:
 
           for attempt in $(seq 1 10); do
             if az storage account show \
-              --name "${{ inputs.tfstate_storage_account }}" \
+              --name "${TFSTATE_STORAGE_ACCOUNT}" \
               --resource-group "$TFSTATE_RG" \
               --subscription "${{ secrets.AZURE_SUBSCRIPTION_ID }}" \
               --query id -o tsv >/dev/null 2>&1; then
-              echo "Storage account '${{ inputs.tfstate_storage_account }}' already exists; skipping creation."
+              echo "Storage account '${TFSTATE_STORAGE_ACCOUNT}' already exists; skipping creation."
               exit 0
             fi
 
             if az storage account create \
-              --name "${{ inputs.tfstate_storage_account }}" \
+              --name "${TFSTATE_STORAGE_ACCOUNT}" \
               --resource-group "$TFSTATE_RG" \
               --subscription "${{ secrets.AZURE_SUBSCRIPTION_ID }}" \
-              --location "${{ inputs.location }}" \
+              --location "${LOCATION}" \
               --sku Standard_LRS \
               --min-tls-version TLS1_2 \
               --allow-blob-public-access false \
               --https-only true; then
-              echo "Storage account '${{ inputs.tfstate_storage_account }}' created successfully."
+              echo "Storage account '${TFSTATE_STORAGE_ACCOUNT}' created successfully."
               exit 0
             fi
 
@@ -214,19 +224,19 @@ jobs:
           ACCOUNT_KEY=$(az storage account keys list \
             --resource-group "$TFSTATE_RG" \
             --subscription "${{ secrets.AZURE_SUBSCRIPTION_ID }}" \
-            --account-name "${{ inputs.tfstate_storage_account }}" \
+            --account-name "${TFSTATE_STORAGE_ACCOUNT}" \
             --query "[0].value" \
             --output tsv)
           if az storage container show \
-            --name "${{ inputs.tfstate_container }}" \
-            --account-name "${{ inputs.tfstate_storage_account }}" \
+            --name "${TFSTATE_CONTAINER}" \
+            --account-name "${TFSTATE_STORAGE_ACCOUNT}" \
             --subscription "${{ secrets.AZURE_SUBSCRIPTION_ID }}" \
             --account-key "$ACCOUNT_KEY" >/dev/null 2>&1; then
-            echo "Blob container '${{ inputs.tfstate_container }}' already exists; skipping creation."
+            echo "Blob container '${TFSTATE_CONTAINER}' already exists; skipping creation."
           else
             az storage container create \
-              --name "${{ inputs.tfstate_container }}" \
-              --account-name "${{ inputs.tfstate_storage_account }}" \
+              --name "${TFSTATE_CONTAINER}" \
+              --account-name "${TFSTATE_STORAGE_ACCOUNT}" \
               --subscription "${{ secrets.AZURE_SUBSCRIPTION_ID }}" \
               --account-key "$ACCOUNT_KEY"
           fi
@@ -238,7 +248,7 @@ jobs:
             --only-show-errors
 
           STORAGE_ID=$(az storage account show \
-            --name "${{ inputs.tfstate_storage_account }}" \
+            --name "${TFSTATE_STORAGE_ACCOUNT}" \
             --resource-group "$TFSTATE_RG" \
             --subscription "${{ secrets.AZURE_SUBSCRIPTION_ID }}" \
             --query id --output tsv)
@@ -271,8 +281,8 @@ jobs:
           for attempt in $(seq 1 10); do
             if terraform init \
               -backend-config="resource_group_name=$TFSTATE_RG" \
-              -backend-config="storage_account_name=${{ inputs.tfstate_storage_account }}" \
-              -backend-config="container_name=${{ inputs.tfstate_container }}" \
+              -backend-config="storage_account_name=${TFSTATE_STORAGE_ACCOUNT}" \
+              -backend-config="container_name=${TFSTATE_CONTAINER}" \
               -backend-config="key=$TFSTATE_KEY" \
               -backend-config="use_oidc=true"; then
               exit 0
@@ -304,7 +314,7 @@ jobs:
           echo "" >> "$GITHUB_STEP_SUMMARY"
           echo "Target subscription: \`$SUB_NAME\` (\`$SUB_ID\`)" >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "Initialized Terraform environment: \`${{ inputs.environment }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "Initialized Terraform environment: \`${ENVIRONMENT}\`" >> "$GITHUB_STEP_SUMMARY"
           echo "Workload resource group: \`$WORKLOAD_RG\`" >> "$GITHUB_STEP_SUMMARY"
           echo "Tfstate resource group: \`$TFSTATE_RG\`" >> "$GITHUB_STEP_SUMMARY"
           echo "Imported state key: \`$TFSTATE_KEY\`" >> "$GITHUB_STEP_SUMMARY"
@@ -314,5 +324,5 @@ jobs:
           echo "| Variable | Value |" >> "$GITHUB_STEP_SUMMARY"
           echo "|---|---|" >> "$GITHUB_STEP_SUMMARY"
           echo "| \`TFSTATE_RESOURCE_GROUP\` | \`$TFSTATE_RG\` |" >> "$GITHUB_STEP_SUMMARY"
-          echo "| \`TFSTATE_STORAGE_ACCOUNT\` | \`${{ inputs.tfstate_storage_account }}\` |" >> "$GITHUB_STEP_SUMMARY"
-          echo "| \`TFSTATE_CONTAINER\` | \`${{ inputs.tfstate_container }}\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| \`TFSTATE_STORAGE_ACCOUNT\` | \`${TFSTATE_STORAGE_ACCOUNT}\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| \`TFSTATE_CONTAINER\` | \`${TFSTATE_CONTAINER}\` |" >> "$GITHUB_STEP_SUMMARY"

@@ -81,6 +81,10 @@ resource "azurerm_container_app" "api" {
       cpu    = 0.5
       memory = "1Gi"
 
+      # Liveness is a pure process check → /health (never touches the DB), so a
+      # transient DB outage restarts nothing. Readiness and startup gate traffic
+      # on real dependencies → /ready (runs SELECT 1), so a replica is only sent
+      # requests once the database is reachable.
       liveness_probe {
         transport = "HTTP"
         port      = var.api_target_port
@@ -90,13 +94,13 @@ resource "azurerm_container_app" "api" {
       readiness_probe {
         transport = "HTTP"
         port      = var.api_target_port
-        path      = "/health"
+        path      = "/ready"
       }
 
       startup_probe {
         transport = "HTTP"
         port      = var.api_target_port
-        path      = "/health"
+        path      = "/ready"
       }
 
       dynamic "env" {

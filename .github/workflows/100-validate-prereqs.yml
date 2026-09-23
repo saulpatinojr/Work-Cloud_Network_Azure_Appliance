@@ -46,8 +46,6 @@ jobs:
           V_GH_APP_ID:                   ${{ secrets.GH_APP_ID }}
           V_GH_APP_PRIVATE_KEY:          ${{ secrets.GH_APP_PRIVATE_KEY }}
           # Optional secrets — mapped so the empty-string check can see them.
-          V_CNA_AWS_ROLE_ARN:            ${{ secrets.CNA_AWS_ROLE_ARN }}
-          V_CNA_PUBLISH_BUCKET:          ${{ secrets.CNA_PUBLISH_BUCKET }}
           V_FRONTDOOR_CERT_PFX_PASSWORD: ${{ secrets.FRONTDOOR_CERTIFICATE_PFX_PASSWORD }}
         run: |
           echo "## Secret Check" >> "$GITHUB_STEP_SUMMARY"
@@ -87,9 +85,7 @@ jobs:
           check_secret "GH_APP_PRIVATE_KEY"          "$V_GH_APP_PRIVATE_KEY"
 
           # Optional — required only for specific workflows
-          check_secret "CNA_AWS_ROLE_ARN"                   "$V_CNA_AWS_ROLE_ARN"            "workflow 320 (AWS publish)"
-          check_secret "CNA_PUBLISH_BUCKET"                 "$V_CNA_PUBLISH_BUCKET"          "workflow 320 (publish portal)"
-          check_secret "FRONTDOOR_CERTIFICATE_PFX_PASSWORD" "$V_FRONTDOOR_CERT_PFX_PASSWORD" "workflow 211 verify (customer TLS)"
+          check_secret "FRONTDOOR_CERTIFICATE_PFX_PASSWORD" "$V_FRONTDOOR_CERT_PFX_PASSWORD" "workflow 210 verify (customer TLS)"
 
           if [[ "$FAILED" -eq 1 ]]; then
             echo ""
@@ -177,8 +173,9 @@ jobs:
           # each stack's own Terraform apply (dev/workload and prod/workload
           # main.tf) — reading `vars.*` here would only ever see the stale
           # repository-scoped fallback, not either environment's real value.
-          # Check them per-environment instead (e.g. workflow 340's dispatch
-          # input) if you need to validate a specific environment's value.
+          # To read a specific environment's value, fetch it directly from that
+          # environment's Azure Key Vault (az keyvault secret show) under your own
+          # identity, or from the environment-scoped GitHub variable itself.
 
           if [[ "$FAILED" -eq 1 ]]; then
             echo ""
@@ -401,4 +398,4 @@ jobs:
           echo "" >> "$GITHUB_STEP_SUMMARY"
           echo "**Next step:** If all checks are green, run workflow \`200 · Build Container Images\`, then workflow \`211 · Deploy Azure Platform (Split)\`." >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "If any checks show ⚠️ placeholder values, those variables will be updated after the first Terraform deploy (workflow 211)." >> "$GITHUB_STEP_SUMMARY"
+          echo "If any checks show ⚠️ placeholder values, those variables will be updated after the first Terraform deploy (workflow 210)." >> "$GITHUB_STEP_SUMMARY"

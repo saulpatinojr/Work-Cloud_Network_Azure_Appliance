@@ -7,7 +7,7 @@ that belongs to a named owner outside the engineering task itself.
 Anything an engineer can solve without external input belongs in [`TODO.md`](TODO.md), not here.
 Application-level blockers live in the core repository's `REVIEW.md`.
 
-**Last reviewed:** 2026-09-18
+**Last reviewed:** 2026-09-23
 
 | ID | Blocker | Owner | Status |
 |---|---|---|---|
@@ -17,6 +17,12 @@ Application-level blockers live in the core repository's `REVIEW.md`.
 | [R-003](#r-003--live-azure-beta-acceptance-sign-off) | 0.8 beta exit — live Azure acceptance sign-off | Product owner | Open — deploy done 2026-08-28, acceptance outstanding |
 | [R-004](#r-004--the-dev-environment-has-no-protection-against-out-of-band-deletion) | Dev environment deleted out of band; no protection against a repeat | Azure subscription owner | Open |
 | [R-005](#r-005--repoint-core_repo-at-the-new-core-repository) | Set `CORE_REPO` to `Work-Cloud_Network_Core` once the core repository is live | Repository admin | Open — until then `230` polls the archived repository |
+| [R-006](#r-006--rotate-secrets-that-reached-uploaded-terraform-plan-artifacts) | Delete the uploaded `tfplan-*` artifacts (they carried `TF_VAR_*` secret values) and rotate the four runtime secrets | Security / secret owner | Open — artifacts within retention are still downloadable |
+| [R-007](#r-007--prevent_destroy-on-stateful-resources-vs-the-330-teardown-design) | `prevent_destroy` on PostgreSQL / storage / Key Vault / Log Analytics conflicts with `330`'s `terraform destroy` | Azure subscription owner | Open — decision |
+| [R-008](#r-008--break-glass-local-admin-policy) | Local admin re-asserted as ADMIN on every deploy; no in-app off switch | Security | Open — decision |
+| [R-009](#r-009--edge-and-firewall-tier-for-a-single-tenant-appliance) | Azure Firewall Premium + Front Door Premium per environment with no Premium feature in use | Azure subscription owner | Open — cost decision [VERIFY pricing] |
+| [R-010](#r-010--220-fast-redeploy-to-prod-outside-the-hub-gate) | `220` can push any image to prod outside Terraform, the catalog and the `hub` gate | Repository admin | Open — decision |
+| [R-011](#r-011--330-purge-and-backend-destroy-jobs-run-at-repository-scope) | `330`'s `purge-soft-deleted` and `destroy-backend` run without an `environment:`; the prod gate is enforced transitively through `needs` | Repository admin | Open — confirm the posture |
 ---
 
 ## R-001 — Security review before the first `byo-api` deploy
@@ -195,3 +201,135 @@ issue is opened for `prod`.
 - `.github/workflows/230-image-update.yml` (`vars.CORE_REPO`)
 - `README.md` → *Configuration*
 - Core `REVIEW.md` R-013 / `TODO.md` T-509
+
+---
+
+## R-006 — Rotate secrets that reached uploaded Terraform plan artifacts
+
+**Problem**
+Until 2026-09-23 `210-deploy` uploaded the workload `tfplan-*` file as a run artifact with the
+default 90-day retention. A saved plan stores every variable value in plaintext — `sensitive`
+only redacts CLI output — so the artifact carried `CNA_POSTGRES_ADMIN_PASSWORD`,
+`CNA_ENTRA_CLIENT_SECRET`, `CNA_NEXTAUTH_SECRET` and `CNA_CREDENTIAL_ENCRYPTION_KEY` for anyone
+with read access to the repository. The upload is removed; past artifacts are not.
+
+**Required owner**
+Security / secret owner.
+
+**Required action**
+Delete every `tfplan-*` artifact under **Actions → run → Artifacts** for past `210` runs, then
+rotate the four secrets. Rotating `CNA_CREDENTIAL_ENCRYPTION_KEY` makes every stored cloud
+credential and BYO AI key undecryptable (core `TODO.md` → T-707), so schedule the re-entry of
+those credentials with the rotation.
+
+**Impact if unresolved**
+Repository readers can recover the dev environment's runtime secrets from old artifacts.
+
+**References**
+- v1.0 review finding DEVOPS-002
+
+## R-007 — `prevent_destroy` on stateful resources vs. the `330` teardown design
+
+**Problem**
+No `lifecycle { prevent_destroy = true }` protects PostgreSQL Flexible Server, the storage
+account, Key Vault or Log Analytics; the only guard is `scripts/ci/refuse_destructive_plan.py`,
+which runs inside `210` and is documented as liftable for one run. Adding `prevent_destroy`
+makes `330-teardown`'s `terraform destroy` fail by design.
+
+**Required owner**
+Azure subscription owner.
+
+**Required action**
+Choose: keep the guard-only posture (and R-004's resource lock), or add `prevent_destroy` and
+make `330` require a code change (flip the flag in a reviewed pull request) before a destroy.
+
+**Impact if unresolved**
+An out-of-band or misdirected apply can delete customer data with no Terraform-level stop.
+
+**References**
+- v1.0 review finding DEVOPS-AZ-001; R-004
+
+## R-008 — Break-glass local admin policy
+
+**Problem**
+The migrator runs `seed-local-admin.js` on every deploy and upserts `local-admin@cna.local`
+with `role: ADMIN`; demoting or deleting the account is reverted at the next deploy, the only off
+switch is unsetting `CNA_LOCAL_ADMIN_PASSWORD`, the limiter on `/api/local-admin` is per replica
+and keyed on `x-azure-clientip`, and the break-glass account exists on Azure only.
+
+**Required owner**
+Security.
+
+**Required action**
+Choose: keep and document the off switch; seed only on the first deploy (`LOCAL_ADMIN_SEED`
+flag); or remove in favour of Entra-only administration.
+
+**Impact if unresolved**
+A standing administrative account that cannot be durably disabled from the product.
+
+**References**
+- v1.0 review findings DATA-005, IMG-017, SEC-004, ARCH-107
+
+## R-009 — Edge and firewall tier for a single-tenant appliance
+
+**Problem**
+Each environment runs Azure Firewall **Premium** and Front Door **Premium** with no Premium
+feature configured (no IDPS, no TLS inspection). The lean-architecture review estimates roughly
+$1.3k/month for the firewall and $330/month for Front Door per environment — several times the
+compute and database cost [VERIFY against subscription rates].
+
+**Required owner**
+Azure subscription owner.
+
+**Required action**
+Decide between Standard tiers (Front Door Standard keeps WAF + Private Link is Premium-only —
+weigh against the origin lock), a NAT Gateway in place of the firewall for egress, or keeping
+Premium with a stated reason.
+
+**Impact if unresolved**
+Cost; no security impact either way.
+
+**References**
+- v1.0 review findings NET-007, ARCH-111
+
+## R-010 — `220-fast-redeploy` to prod outside the `hub` gate
+
+**Problem**
+`220` runs `az containerapp update` with any operator-typed image reference under
+`environment: prod`, bypassing Terraform, the release catalog, the destructive-plan guard and
+the `hub` reviewers.
+
+**Required owner**
+Repository admin.
+
+**Required action**
+Restrict `220` to `dev`, or run its prod path under `environment: hub`.
+
+**Impact if unresolved**
+A single operator can put an arbitrary image into production with no second pair of eyes.
+
+**References**
+- v1.0 review finding DEVOPS-AZ-003
+
+## R-011 — `330` purge and backend-destroy jobs run at repository scope
+
+**Problem**
+In `330-teardown`, `purge-soft-deleted` (subscription-level Cognitive Services purge) and
+`destroy-backend` (the separate tfstate resource group) run without an `environment:` because
+the environment-scoped deploy identities cannot reach those scopes; only the repository-level
+identity can. The prod human gate is enforced transitively: both jobs `needs` the hub-gated
+`terraform-destroy`. The AWS sibling runs the equivalent job under `hub`.
+
+**Required owner**
+Repository admin.
+
+**Required action**
+Confirm the transitive-gate posture (and add a comment test so the `needs` edges cannot be
+removed silently), or give the `hub` environment an identity with the subscription-level scope.
+
+**Impact if unresolved**
+None while the `needs` edges stand; a future edit could detach the gate unnoticed.
+
+**References**
+- v1.0 review finding DEVOPS-005; WS-4 verification note
+

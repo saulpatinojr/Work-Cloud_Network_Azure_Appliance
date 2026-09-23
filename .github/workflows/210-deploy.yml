@@ -134,6 +134,22 @@ env:
   EFFECTIVE_WORKER_IMAGE: ""
   EFFECTIVE_WEB_IMAGE: ""
   EFFECTIVE_MIGRATOR_IMAGE: ""
+  # Bind untrusted/dispatch-supplied inputs to env once, workflow-wide, so no
+  # run: block interpolates ${{ inputs.* }} into shell text (DEVOPS-001). Steps
+  # reference the shell variables ($ENVIRONMENT, $AI_MODE, ...) instead.
+  ENVIRONMENT: ${{ inputs.environment }}
+  AI_MODE: ${{ inputs.ai_mode }}
+  DEPLOY_MODE: ${{ inputs.deploy_mode }}
+  INPUT_API_IMAGE: ${{ inputs.api_image }}
+  INPUT_WORKER_IMAGE: ${{ inputs.worker_image }}
+  INPUT_WEB_IMAGE: ${{ inputs.web_image }}
+  INPUT_PREVIOUS_API_IMAGE: ${{ inputs.previous_api_image }}
+  INPUT_PREVIOUS_WORKER_IMAGE: ${{ inputs.previous_worker_image }}
+  INPUT_PREVIOUS_WEB_IMAGE: ${{ inputs.previous_web_image }}
+  SOURCE_REPO: ${{ inputs.source_repo || github.repository }}
+  SOURCE_MANIFEST_RUN_ID: ${{ inputs.source_manifest_run_id }}
+  FOUNDRY_CHECK_STATUS: ${{ inputs.ai_mode == 'byo-api' && 'not_applicable' || 'required' }}
+  AZURE_OPENAI_CHECK_STATUS: ${{ inputs.ai_mode == 'byo-api' && 'not_applicable' || 'out_of_band_optional' }}
 
 jobs:
   policy-gates:
@@ -168,18 +184,18 @@ jobs:
             fi
           }
 
-          if [ "${{ inputs.deploy_mode }}" = "rollback" ]; then
-            if [[ -z "${{ inputs.previous_api_image }}" || -z "${{ inputs.previous_worker_image }}" || -z "${{ inputs.previous_web_image }}" ]]; then
+          if [ "${DEPLOY_MODE}" = "rollback" ]; then
+            if [[ -z "${INPUT_PREVIOUS_API_IMAGE}" || -z "${INPUT_PREVIOUS_WORKER_IMAGE}" || -z "${INPUT_PREVIOUS_WEB_IMAGE}" ]]; then
               echo "::error::Rollback requires all three previous_*_image inputs. Check .deployment-catalog/<env>/latest.json (or a <run_id>.json archive) for the image SHAs to roll back to."
               exit 1
             fi
-            echo "EFFECTIVE_API_IMAGE=${{ inputs.previous_api_image }}" >> "$GITHUB_ENV"
-            echo "EFFECTIVE_WORKER_IMAGE=${{ inputs.previous_worker_image }}" >> "$GITHUB_ENV"
-            echo "EFFECTIVE_WEB_IMAGE=${{ inputs.previous_web_image }}" >> "$GITHUB_ENV"
+            echo "EFFECTIVE_API_IMAGE=${INPUT_PREVIOUS_API_IMAGE}" >> "$GITHUB_ENV"
+            echo "EFFECTIVE_WORKER_IMAGE=${INPUT_PREVIOUS_WORKER_IMAGE}" >> "$GITHUB_ENV"
+            echo "EFFECTIVE_WEB_IMAGE=${INPUT_PREVIOUS_WEB_IMAGE}" >> "$GITHUB_ENV"
           else
-            echo "EFFECTIVE_API_IMAGE=$(image_or_default '${{ inputs.api_image }}' 'cna:api-latest')" >> "$GITHUB_ENV"
-            echo "EFFECTIVE_WORKER_IMAGE=$(image_or_default '${{ inputs.worker_image }}' 'cna:worker-latest')" >> "$GITHUB_ENV"
-            echo "EFFECTIVE_WEB_IMAGE=$(image_or_default '${{ inputs.web_image }}' 'cna:web-latest')" >> "$GITHUB_ENV"
+            echo "EFFECTIVE_API_IMAGE=$(image_or_default '${INPUT_API_IMAGE}' 'cna:api-latest')" >> "$GITHUB_ENV"
+            echo "EFFECTIVE_WORKER_IMAGE=$(image_or_default '${INPUT_WORKER_IMAGE}' 'cna:worker-latest')" >> "$GITHUB_ENV"
+            echo "EFFECTIVE_WEB_IMAGE=$(image_or_default '${INPUT_WEB_IMAGE}' 'cna:web-latest')" >> "$GITHUB_ENV"
           fi
           echo "EFFECTIVE_MIGRATOR_IMAGE=docker.io/${DOCKERHUB_NAMESPACE}/cna:migrator-latest" >> "$GITHUB_ENV"
 
@@ -199,11 +215,13 @@ jobs:
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
       - name: Verify target subscription
+        env:
+          VAR_TARGET_SUBSCRIPTION_NAME: ${{ vars.AZURE_TARGET_SUBSCRIPTION_NAME }}
         run: |
           SUB_ID=$(az account show --query id -o tsv)
           SUB_NAME=$(az account show --query name -o tsv)
           EXPECTED_SUB_ID="${{ secrets.AZURE_SUBSCRIPTION_ID }}"
-          EXPECTED_SUB_NAME="${{ vars.AZURE_TARGET_SUBSCRIPTION_NAME }}"
+          EXPECTED_SUB_NAME="$VAR_TARGET_SUBSCRIPTION_NAME"
 
           if [[ -n "$EXPECTED_SUB_ID" && "$EXPECTED_SUB_ID" != "none" && "$EXPECTED_SUB_ID" != "$SUB_ID" ]]; then
             echo "::error::Authenticated to subscription $SUB_ID, but AZURE_SUBSCRIPTION_ID expects $EXPECTED_SUB_ID"
@@ -243,19 +261,23 @@ jobs:
             --password-stdin
 
           for image in \
-            "${{ env.EFFECTIVE_API_IMAGE }}" \
-            "${{ env.EFFECTIVE_WORKER_IMAGE }}" \
-            "${{ env.EFFECTIVE_WEB_IMAGE }}" \
-            "${{ env.EFFECTIVE_MIGRATOR_IMAGE }}"; do
+            "$EFFECTIVE_API_IMAGE" \
+            "$EFFECTIVE_WORKER_IMAGE" \
+            "$EFFECTIVE_WEB_IMAGE" \
+            "$EFFECTIVE_MIGRATOR_IMAGE"; do
             echo "Checking $image"
             docker manifest inspect "$image" > /dev/null
           done
 
       - name: Resolve Terraform backend targets
+        env:
+          VAR_TFSTATE_CONTAINER: ${{ vars.TFSTATE_CONTAINER }}
+          VAR_TFSTATE_RESOURCE_GROUP: ${{ vars.TFSTATE_RESOURCE_GROUP }}
+          VAR_TFSTATE_STORAGE_ACCOUNT: ${{ vars.TFSTATE_STORAGE_ACCOUNT }}
         run: |
-          echo "TFSTATE_RESOURCE_GROUP=${{ vars.TFSTATE_RESOURCE_GROUP }}" >> "$GITHUB_ENV"
-          echo "TFSTATE_STORAGE_ACCOUNT=${{ vars.TFSTATE_STORAGE_ACCOUNT }}" >> "$GITHUB_ENV"
-          echo "TFSTATE_CONTAINER=${{ vars.TFSTATE_CONTAINER }}" >> "$GITHUB_ENV"
+          echo "TFSTATE_RESOURCE_GROUP=${VAR_TFSTATE_RESOURCE_GROUP}" >> "$GITHUB_ENV"
+          echo "TFSTATE_STORAGE_ACCOUNT=${VAR_TFSTATE_STORAGE_ACCOUNT}" >> "$GITHUB_ENV"
+          echo "TFSTATE_CONTAINER=${VAR_TFSTATE_CONTAINER}" >> "$GITHUB_ENV"
 
       - name: Terraform init
         run: |
@@ -263,7 +285,7 @@ jobs:
             -backend-config="resource_group_name=$TFSTATE_RESOURCE_GROUP" \
             -backend-config="storage_account_name=$TFSTATE_STORAGE_ACCOUNT" \
             -backend-config="container_name=$TFSTATE_CONTAINER" \
-            -backend-config="key=${{ inputs.environment }}.terraform.tfstate" \
+            -backend-config="key=${ENVIRONMENT}.terraform.tfstate" \
             -backend-config="use_oidc=true"
 
           cd ../workload
@@ -271,7 +293,7 @@ jobs:
             -backend-config="resource_group_name=$TFSTATE_RESOURCE_GROUP" \
             -backend-config="storage_account_name=$TFSTATE_STORAGE_ACCOUNT" \
             -backend-config="container_name=$TFSTATE_CONTAINER" \
-            -backend-config="key=${{ inputs.environment }}.workload.terraform.tfstate" \
+            -backend-config="key=${ENVIRONMENT}.workload.terraform.tfstate" \
             -backend-config="use_oidc=true"
 
       - name: Terraform validate
@@ -294,7 +316,7 @@ jobs:
             echo "::error::checkov not found at $CHECKOV after pipx install"
             exit 1
           fi
-          GATE="$GITHUB_WORKSPACE/policy-gates-${{ inputs.environment }}.json"
+          GATE="$GITHUB_WORKSPACE/policy-gates-${ENVIRONMENT}.json"
           CURATED_CHECKS="CKV_AZURE_236,CKV_AZURE_238,CKV_AZURE_134,CKV_AZURE_136,CKV_AZURE_189,CKV_AZURE_109,CKV_AZURE_41,CKV_AZURE_114,CKV_AZURE_206,CKV_AZURE_190,CKV_AZURE_59,CKV2_AZURE_38,CKV2_AZURE_31,CKV2_AZURE_47,CKV2_AZURE_40,CKV2_AZURE_41"
           "$CHECKOV" -d . --framework terraform --check "$CURATED_CHECKS" --output cli
           printf '{"status":"passed","blocking":true,"checks":"%s"}\n' "$CURATED_CHECKS" > "$GATE"
@@ -354,11 +376,13 @@ jobs:
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
       - name: Verify target subscription
+        env:
+          VAR_TARGET_SUBSCRIPTION_NAME: ${{ vars.AZURE_TARGET_SUBSCRIPTION_NAME }}
         run: |
           SUB_ID=$(az account show --query id -o tsv)
           SUB_NAME=$(az account show --query name -o tsv)
           EXPECTED_SUB_ID="${{ secrets.AZURE_SUBSCRIPTION_ID }}"
-          EXPECTED_SUB_NAME="${{ vars.AZURE_TARGET_SUBSCRIPTION_NAME }}"
+          EXPECTED_SUB_NAME="$VAR_TARGET_SUBSCRIPTION_NAME"
 
           if [[ -n "$EXPECTED_SUB_ID" && "$EXPECTED_SUB_ID" != "none" && "$EXPECTED_SUB_ID" != "$SUB_ID" ]]; then
             echo "::error::Authenticated to subscription $SUB_ID, but AZURE_SUBSCRIPTION_ID expects $EXPECTED_SUB_ID"
@@ -404,10 +428,14 @@ jobs:
         run: python3 $GITHUB_WORKSPACE/scripts/ci/resolve_rollback_target.py
 
       - name: Resolve Terraform backend targets
+        env:
+          VAR_TFSTATE_CONTAINER: ${{ vars.TFSTATE_CONTAINER }}
+          VAR_TFSTATE_RESOURCE_GROUP: ${{ vars.TFSTATE_RESOURCE_GROUP }}
+          VAR_TFSTATE_STORAGE_ACCOUNT: ${{ vars.TFSTATE_STORAGE_ACCOUNT }}
         run: |
-          echo "TFSTATE_RESOURCE_GROUP=${{ vars.TFSTATE_RESOURCE_GROUP }}" >> "$GITHUB_ENV"
-          echo "TFSTATE_STORAGE_ACCOUNT=${{ vars.TFSTATE_STORAGE_ACCOUNT }}" >> "$GITHUB_ENV"
-          echo "TFSTATE_CONTAINER=${{ vars.TFSTATE_CONTAINER }}" >> "$GITHUB_ENV"
+          echo "TFSTATE_RESOURCE_GROUP=${VAR_TFSTATE_RESOURCE_GROUP}" >> "$GITHUB_ENV"
+          echo "TFSTATE_STORAGE_ACCOUNT=${VAR_TFSTATE_STORAGE_ACCOUNT}" >> "$GITHUB_ENV"
+          echo "TFSTATE_CONTAINER=${VAR_TFSTATE_CONTAINER}" >> "$GITHUB_ENV"
 
       - name: Terraform init
         run: |
@@ -415,7 +443,7 @@ jobs:
             -backend-config="resource_group_name=$TFSTATE_RESOURCE_GROUP" \
             -backend-config="storage_account_name=$TFSTATE_STORAGE_ACCOUNT" \
             -backend-config="container_name=$TFSTATE_CONTAINER" \
-            -backend-config="key=${{ inputs.environment }}.terraform.tfstate" \
+            -backend-config="key=${ENVIRONMENT}.terraform.tfstate" \
             -backend-config="use_oidc=true"
 
           cd ../workload
@@ -423,17 +451,18 @@ jobs:
             -backend-config="resource_group_name=$TFSTATE_RESOURCE_GROUP" \
             -backend-config="storage_account_name=$TFSTATE_STORAGE_ACCOUNT" \
             -backend-config="container_name=$TFSTATE_CONTAINER" \
-            -backend-config="key=${{ inputs.environment }}.workload.terraform.tfstate" \
+            -backend-config="key=${ENVIRONMENT}.workload.terraform.tfstate" \
             -backend-config="use_oidc=true"
 
       - name: Ensure Key Vault is reachable during Terraform
         env:
+          VAR_KEY_VAULT_NAME: ${{ vars.KEY_VAULT_NAME }}
           REGION_SHORT: ${{ vars.AZURE_REGION_SHORT }}
         run: |
           if [[ -n "$TFSTATE_RESOURCE_GROUP" && "$TFSTATE_RESOURCE_GROUP" == *-tfstate ]]; then
             WORKLOAD_RG="${TFSTATE_RESOURCE_GROUP%-tfstate}"
           elif [[ -n "$REGION_SHORT" ]]; then
-            WORKLOAD_RG="rg-cna-${{ inputs.environment }}-${REGION_SHORT}"
+            WORKLOAD_RG="rg-cna-${ENVIRONMENT}-${REGION_SHORT}"
           else
             echo "::error::AZURE_REGION_SHORT is required when TFSTATE_RESOURCE_GROUP is not set."
             exit 1
@@ -446,7 +475,7 @@ jobs:
           # both env workloads write it (last apply wins), so a prod run could
           # otherwise be handed the dev vault name. Bare "-kv" is the bootstrap
           # fallback before the first apply, when the vault doesn't exist anyway.
-          KEY_VAULT_NAME="${{ vars.KEY_VAULT_NAME }}"
+          KEY_VAULT_NAME="$VAR_KEY_VAULT_NAME"
           if [[ "$KEY_VAULT_NAME" != "${WORKLOAD_NAME_PREFIX}-kv"* ]]; then
             # Variable missing or belongs to the other environment — resolve the
             # real vault (name carries a suffix, e.g. -kv2) from Azure instead of
@@ -559,10 +588,10 @@ jobs:
               echo "$INPUT"
             fi
           }
-          API_IMG=$(resolve "${{ env.EFFECTIVE_API_IMAGE }}" "api")
-          WORKER_IMG=$(resolve "${{ env.EFFECTIVE_WORKER_IMAGE }}" "worker")
-          WEB_IMG=$(resolve "${{ env.EFFECTIVE_WEB_IMAGE }}" "web")
-          MIGRATOR_IMG=$(resolve "${{ env.EFFECTIVE_MIGRATOR_IMAGE }}" "migrator")
+          API_IMG=$(resolve "$EFFECTIVE_API_IMAGE" "api")
+          WORKER_IMG=$(resolve "$EFFECTIVE_WORKER_IMAGE" "worker")
+          WEB_IMG=$(resolve "$EFFECTIVE_WEB_IMAGE" "web")
+          MIGRATOR_IMG=$(resolve "$EFFECTIVE_MIGRATOR_IMAGE" "migrator")
           echo "EFFECTIVE_API_IMAGE=${API_IMG}" >> "$GITHUB_ENV"
           echo "EFFECTIVE_WORKER_IMAGE=${WORKER_IMG}" >> "$GITHUB_ENV"
           echo "EFFECTIVE_WEB_IMAGE=${WEB_IMG}" >> "$GITHUB_ENV"
@@ -604,7 +633,7 @@ jobs:
       # ai_mode is the one app-facing value the platform root does declare: in
       # byo-api it opens firewall egress to the bring-your-own AI providers.
       - name: Terraform plan (platform)
-        run: terraform plan -out=tfplan -var="ai_mode=${{ inputs.ai_mode }}"
+        run: terraform plan -out=tfplan -var="ai_mode=${AI_MODE}"
 
       # Workload = compute, database, identity, AI, Front Door. It owns every app
       # variable and secret. Secrets are passed via TF_VAR_* env (never -var on the
@@ -616,6 +645,16 @@ jobs:
         continue-on-error: true
         working-directory: infra/terraform/environments/${{ inputs.environment }}/workload
         env:
+          VAR_AI_ENGINE_DEFAULT: ${{ vars.CNA_AI_ENGINE_DEFAULT }}
+          VAR_AWS_MCP_ENDPOINT: ${{ vars.CNA_AWS_MCP_ENDPOINT }}
+          VAR_AWS_MCP_TRANSPORT: ${{ vars.CNA_AWS_MCP_TRANSPORT }}
+          VAR_AZURE_MCP_ENDPOINT: ${{ vars.CNA_AZURE_MCP_ENDPOINT }}
+          VAR_AZURE_MCP_TRANSPORT: ${{ vars.CNA_AZURE_MCP_TRANSPORT }}
+          VAR_DRAWIO_MCP_URL: ${{ vars.CNA_DRAWIO_MCP_URL }}
+          VAR_ENTRA_CLIENT_ID: ${{ vars.CNA_ENTRA_CLIENT_ID }}
+          VAR_FOUNDRY_PROJECT_ENDPOINT: ${{ vars.FOUNDRY_PROJECT_ENDPOINT }}
+          VAR_FOUNDRY_RECOMMENDATION_AGENT_ID: ${{ vars.FOUNDRY_RECOMMENDATION_AGENT_ID }}
+          VAR_NEXTAUTH_URL: ${{ vars.CNA_NEXTAUTH_URL }}
           TF_VAR_postgres_admin_password: ${{ secrets.CNA_POSTGRES_ADMIN_PASSWORD }}
           TF_VAR_entra_client_secret: ${{ secrets.CNA_ENTRA_CLIENT_SECRET }}
           TF_VAR_nextauth_secret: ${{ secrets.CNA_NEXTAUTH_SECRET }}
@@ -635,31 +674,31 @@ jobs:
           # ai_engine_default must satisfy the Terraform cross-variable validation for
           # the selected ai_mode: saas => azure-openai, byo-api => anthropic|openai.
           # A repo variable that names an engine from the other mode is ignored.
-          AI_MODE="${{ inputs.ai_mode }}"
-          AI_ENGINE_DEFAULT=$(optional_var "${{ vars.CNA_AI_ENGINE_DEFAULT }}")
+          AI_MODE="${AI_MODE}"
+          AI_ENGINE_DEFAULT=$(optional_var "$VAR_AI_ENGINE_DEFAULT")
           if [ "$AI_MODE" = "byo-api" ]; then
             case "$AI_ENGINE_DEFAULT" in anthropic|openai) ;; *) AI_ENGINE_DEFAULT="anthropic" ;; esac
           else
             AI_ENGINE_DEFAULT="azure-openai"
           fi
-          AZURE_MCP_ENDPOINT=$(optional_var "${{ vars.CNA_AZURE_MCP_ENDPOINT }}")
-          AZURE_MCP_TRANSPORT=$(optional_var "${{ vars.CNA_AZURE_MCP_TRANSPORT }}")
-          AWS_MCP_ENDPOINT=$(optional_var "${{ vars.CNA_AWS_MCP_ENDPOINT }}")
-          AWS_MCP_TRANSPORT=$(optional_var "${{ vars.CNA_AWS_MCP_TRANSPORT }}")
-          DRAWIO_MCP_URL=$(optional_var "${{ vars.CNA_DRAWIO_MCP_URL }}")
-          FOUNDRY_PROJECT_ENDPOINT=$(optional_var "${{ vars.FOUNDRY_PROJECT_ENDPOINT }}")
-          FOUNDRY_RECOMMENDATION_AGENT_ID=$(optional_var "${{ vars.FOUNDRY_RECOMMENDATION_AGENT_ID }}")
+          AZURE_MCP_ENDPOINT=$(optional_var "$VAR_AZURE_MCP_ENDPOINT")
+          AZURE_MCP_TRANSPORT=$(optional_var "$VAR_AZURE_MCP_TRANSPORT")
+          AWS_MCP_ENDPOINT=$(optional_var "$VAR_AWS_MCP_ENDPOINT")
+          AWS_MCP_TRANSPORT=$(optional_var "$VAR_AWS_MCP_TRANSPORT")
+          DRAWIO_MCP_URL=$(optional_var "$VAR_DRAWIO_MCP_URL")
+          FOUNDRY_PROJECT_ENDPOINT=$(optional_var "$VAR_FOUNDRY_PROJECT_ENDPOINT")
+          FOUNDRY_RECOMMENDATION_AGENT_ID=$(optional_var "$VAR_FOUNDRY_RECOMMENDATION_AGENT_ID")
           SECRET_EXPIRY=$(date -u -d "+90 days" "+%Y-%m-%dT%H:%M:%SZ")
 
           terraform plan -out=tfplan \
             -var="github_owner=${{ github.repository_owner }}" \
             -var="github_repository=${GITHUB_REPOSITORY#*/}" \
-            -var="api_image=${{ env.EFFECTIVE_API_IMAGE }}" \
-            -var="worker_image=${{ env.EFFECTIVE_WORKER_IMAGE }}" \
-            -var="web_image=${{ env.EFFECTIVE_WEB_IMAGE }}" \
-            -var="entra_client_id=${{ vars.CNA_ENTRA_CLIENT_ID }}" \
-            -var="nextauth_url=${{ vars.CNA_NEXTAUTH_URL }}" \
-            -var="container_registry_username=${{ vars.DOCKERHUB_NAMESPACE }}" \
+            -var="api_image=${EFFECTIVE_API_IMAGE}" \
+            -var="worker_image=${EFFECTIVE_WORKER_IMAGE}" \
+            -var="web_image=${EFFECTIVE_WEB_IMAGE}" \
+            -var="entra_client_id=${VAR_ENTRA_CLIENT_ID}" \
+            -var="nextauth_url=${VAR_NEXTAUTH_URL}" \
+            -var="container_registry_username=${DOCKERHUB_NAMESPACE}" \
             -var="ai_mode=${AI_MODE}" \
             -var="ai_engine_default=${AI_ENGINE_DEFAULT}" \
             -var="azure_mcp_endpoint=${AZURE_MCP_ENDPOINT}" \
@@ -673,51 +712,78 @@ jobs:
 
       - name: Create deployment manifest
         run: |
-          mkdir -p $GITHUB_WORKSPACE/.deployment-catalog/${{ inputs.environment }}
-          cat > $GITHUB_WORKSPACE/.deployment-catalog/${{ inputs.environment }}/deployment-manifest.json <<'MANIFEST'
+          mkdir -p "$GITHUB_WORKSPACE/.deployment-catalog/${ENVIRONMENT}"
+          # Built with jq from env vars so no dispatch-supplied value is
+          # interpolated into shell and the JSON is always well formed.
+          jq -n \
+            --arg environment "$ENVIRONMENT" \
+            --arg deploy_mode "$DEPLOY_MODE" \
+            --arg ai_mode "$AI_MODE" \
+            --arg source_repo "$SOURCE_REPO" \
+            --arg source_manifest_run_id "$SOURCE_MANIFEST_RUN_ID" \
+            --arg api_image "$EFFECTIVE_API_IMAGE" \
+            --arg worker_image "$EFFECTIVE_WORKER_IMAGE" \
+            --arg web_image "$EFFECTIVE_WEB_IMAGE" \
+            --arg migrator_image "$EFFECTIVE_MIGRATOR_IMAGE" \
+            --arg commit_sha "$GITHUB_SHA" \
+            --arg workflow_run_id "$GITHUB_RUN_ID" \
+            --arg foundry_check "$FOUNDRY_CHECK_STATUS" \
+            --arg openai_check "$AZURE_OPENAI_CHECK_STATUS" \
+            '{
+              environment: $environment,
+              deploy_mode: $deploy_mode,
+              ai_mode: $ai_mode,
+              source_repo: $source_repo,
+              source_manifest_run_id: $source_manifest_run_id,
+              api_image: $api_image,
+              worker_image: $worker_image,
+              web_image: $web_image,
+              migrator_image: $migrator_image,
+              commit_sha: $commit_sha,
+              workflow_run_id: $workflow_run_id,
+              approval_status: "pending",
+              health_status: "unknown",
+              validation_checks: {
+                terraform_apply: "pending",
+                post_deploy_probe: "pending",
+                independent_verification: "pending",
+                promotion_ready: "pending",
+                external_health_validation: "pending",
+                foundry_private_dns_validation: $foundry_check,
+                foundry_managed_identity_inference: $foundry_check,
+                azure_openai_provider_status: $openai_check,
+                certificate_monitoring: "pending",
+                canary_telemetry: "pending",
+                staged_promotion: "pending",
+                certificate_rotation: "pending"
+              }
+            }' > "$GITHUB_WORKSPACE/.deployment-catalog/${ENVIRONMENT}/deployment-manifest.json"
+
+      - name: Terraform plan summary
+        if: always()
+        # Saved plan files are NOT uploaded as artifacts: a binary plan stores
+        # every input variable value (DB password, client secrets, encryption
+        # key) in plaintext (DEVOPS-002). The apply job re-plans anyway. Only the
+        # human-readable `terraform show` output, which redacts sensitive values,
+        # goes to the step summary.
+        run: |
           {
-            "environment": "${{ inputs.environment }}",
-            "deploy_mode": "${{ inputs.deploy_mode }}",
-            "ai_mode": "${{ inputs.ai_mode }}",
-            "source_repo": "${{ inputs.source_repo || github.repository }}",
-            "source_manifest_run_id": "${{ inputs.source_manifest_run_id }}",
-            "api_image": "${{ env.EFFECTIVE_API_IMAGE }}",
-            "worker_image": "${{ env.EFFECTIVE_WORKER_IMAGE }}",
-            "web_image": "${{ env.EFFECTIVE_WEB_IMAGE }}",
-            "migrator_image": "${{ env.EFFECTIVE_MIGRATOR_IMAGE }}",
-            "commit_sha": "${{ github.sha }}",
-            "workflow_run_id": "${{ github.run_id }}",
-            "approval_status": "pending",
-            "health_status": "unknown",
-            "validation_checks": {
-              "terraform_apply": "pending",
-              "post_deploy_probe": "pending",
-              "independent_verification": "pending",
-              "promotion_ready": "pending",
-              "external_health_validation": "pending",
-              "foundry_private_dns_validation": "${{ inputs.ai_mode == 'byo-api' && 'not_applicable' || 'required' }}",
-              "foundry_managed_identity_inference": "${{ inputs.ai_mode == 'byo-api' && 'not_applicable' || 'required' }}",
-              "azure_openai_provider_status": "${{ inputs.ai_mode == 'byo-api' && 'not_applicable' || 'out_of_band_optional' }}",
-              "certificate_monitoring": "pending",
-              "canary_telemetry": "pending",
-              "staged_promotion": "pending",
-              "certificate_rotation": "pending"
-            }
-          }
-          MANIFEST
-
-      - name: Upload platform plan artifact
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: tfplan-platform-${{ inputs.environment }}
-          path: infra/terraform/environments/${{ inputs.environment }}/platform/tfplan
-
-      - name: Upload workload plan artifact
-        if: hashFiles(format('infra/terraform/environments/{0}/workload/tfplan', inputs.environment)) != ''
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: tfplan-workload-${{ inputs.environment }}
-          path: infra/terraform/environments/${{ inputs.environment }}/workload/tfplan
+            echo "## Terraform plan (${ENVIRONMENT})"
+            echo "_Plan files are not uploaded; sensitive values below are redacted by terraform show. The apply job re-plans._"
+            for layer in platform workload; do
+              dir="infra/terraform/environments/${ENVIRONMENT}/${layer}"
+              echo "<details><summary>${layer}</summary>"
+              echo
+              echo '```'
+              if [ -f "${dir}/tfplan" ]; then
+                terraform -chdir="${dir}" show -no-color tfplan 2>&1 || echo "(unable to render ${layer} plan)"
+              else
+                echo "(no ${layer} plan produced)"
+              fi
+              echo '```'
+              echo "</details>"
+            done
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload deployment manifest
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
@@ -727,19 +793,23 @@ jobs:
 
       - name: Remove Runner IP from Key Vault
         if: always()
+        env:
+          VAR_KEY_VAULT_NAME: ${{ vars.KEY_VAULT_NAME }}
+          VAR_REGION_SHORT: ${{ vars.AZURE_REGION_SHORT }}
+          VAR_TFSTATE_RESOURCE_GROUP: ${{ vars.TFSTATE_RESOURCE_GROUP }}
         run: |
-          REGION_SHORT=${{ vars.AZURE_REGION_SHORT }}
-          if [[ -n "${{ vars.TFSTATE_RESOURCE_GROUP }}" && "${{ vars.TFSTATE_RESOURCE_GROUP }}" == *-tfstate ]]; then
-            WORKLOAD_RG="${{ vars.TFSTATE_RESOURCE_GROUP }}"
+          REGION_SHORT=${VAR_REGION_SHORT}
+          if [[ -n "$VAR_TFSTATE_RESOURCE_GROUP" && "$VAR_TFSTATE_RESOURCE_GROUP" == *-tfstate ]]; then
+            WORKLOAD_RG="$VAR_TFSTATE_RESOURCE_GROUP"
             WORKLOAD_RG="${WORKLOAD_RG%-tfstate}"
           else
-            WORKLOAD_RG="rg-cna-${{ inputs.environment }}-${REGION_SHORT}"
+            WORKLOAD_RG="rg-cna-${ENVIRONMENT}-${REGION_SHORT}"
           fi
           # Trust the Terraform-maintained KEY_VAULT_NAME variable (the real name
           # carries a suffix), but only if it matches THIS environment's prefix —
           # the variable is repo-level and both env workloads write it (last
           # apply wins). Bare "-kv" is the pre-first-apply fallback.
-          KEY_VAULT_NAME="${{ vars.KEY_VAULT_NAME }}"
+          KEY_VAULT_NAME="$VAR_KEY_VAULT_NAME"
           if [[ "$KEY_VAULT_NAME" != "${WORKLOAD_RG#rg-}-kv"* ]]; then
             # Variable missing or belongs to the other environment — resolve the
             # real vault (name carries a suffix, e.g. -kv2) from Azure instead of
@@ -845,10 +915,14 @@ jobs:
           az extension add --name containerapp --upgrade --only-show-errors
 
       - name: Resolve Terraform backend targets
+        env:
+          VAR_TFSTATE_CONTAINER: ${{ vars.TFSTATE_CONTAINER }}
+          VAR_TFSTATE_RESOURCE_GROUP: ${{ vars.TFSTATE_RESOURCE_GROUP }}
+          VAR_TFSTATE_STORAGE_ACCOUNT: ${{ vars.TFSTATE_STORAGE_ACCOUNT }}
         run: |
-          echo "TFSTATE_RESOURCE_GROUP=${{ vars.TFSTATE_RESOURCE_GROUP }}" >> "$GITHUB_ENV"
-          echo "TFSTATE_STORAGE_ACCOUNT=${{ vars.TFSTATE_STORAGE_ACCOUNT }}" >> "$GITHUB_ENV"
-          echo "TFSTATE_CONTAINER=${{ vars.TFSTATE_CONTAINER }}" >> "$GITHUB_ENV"
+          echo "TFSTATE_RESOURCE_GROUP=${VAR_TFSTATE_RESOURCE_GROUP}" >> "$GITHUB_ENV"
+          echo "TFSTATE_STORAGE_ACCOUNT=${VAR_TFSTATE_STORAGE_ACCOUNT}" >> "$GITHUB_ENV"
+          echo "TFSTATE_CONTAINER=${VAR_TFSTATE_CONTAINER}" >> "$GITHUB_ENV"
 
       - name: Terraform init
         run: |
@@ -856,7 +930,7 @@ jobs:
             -backend-config="resource_group_name=$TFSTATE_RESOURCE_GROUP" \
             -backend-config="storage_account_name=$TFSTATE_STORAGE_ACCOUNT" \
             -backend-config="container_name=$TFSTATE_CONTAINER" \
-            -backend-config="key=${{ inputs.environment }}.terraform.tfstate" \
+            -backend-config="key=${ENVIRONMENT}.terraform.tfstate" \
             -backend-config="use_oidc=true"
 
           cd ../workload
@@ -864,17 +938,18 @@ jobs:
             -backend-config="resource_group_name=$TFSTATE_RESOURCE_GROUP" \
             -backend-config="storage_account_name=$TFSTATE_STORAGE_ACCOUNT" \
             -backend-config="container_name=$TFSTATE_CONTAINER" \
-            -backend-config="key=${{ inputs.environment }}.workload.terraform.tfstate" \
+            -backend-config="key=${ENVIRONMENT}.workload.terraform.tfstate" \
             -backend-config="use_oidc=true"
 
       - name: Ensure Key Vault is reachable during Terraform
         env:
+          VAR_KEY_VAULT_NAME: ${{ vars.KEY_VAULT_NAME }}
           REGION_SHORT: ${{ vars.AZURE_REGION_SHORT }}
         run: |
           if [[ -n "$TFSTATE_RESOURCE_GROUP" && "$TFSTATE_RESOURCE_GROUP" == *-tfstate ]]; then
             WORKLOAD_RG="${TFSTATE_RESOURCE_GROUP%-tfstate}"
           elif [[ -n "$REGION_SHORT" ]]; then
-            WORKLOAD_RG="rg-cna-${{ inputs.environment }}-${REGION_SHORT}"
+            WORKLOAD_RG="rg-cna-${ENVIRONMENT}-${REGION_SHORT}"
           else
             echo "::error::AZURE_REGION_SHORT is required when TFSTATE_RESOURCE_GROUP is not set."
             exit 1
@@ -887,7 +962,7 @@ jobs:
           # both env workloads write it (last apply wins), so a prod run could
           # otherwise be handed the dev vault name. Bare "-kv" is the bootstrap
           # fallback before the first apply, when the vault doesn't exist anyway.
-          KEY_VAULT_NAME="${{ vars.KEY_VAULT_NAME }}"
+          KEY_VAULT_NAME="$VAR_KEY_VAULT_NAME"
           if [[ "$KEY_VAULT_NAME" != "${WORKLOAD_NAME_PREFIX}-kv"* ]]; then
             # Variable missing or belongs to the other environment — resolve the
             # real vault (name carries a suffix, e.g. -kv2) from Azure instead of
@@ -974,11 +1049,13 @@ jobs:
             fi
           done
 
-      - name: Download platform plan artifact
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
-        with:
-          name: tfplan-platform-${{ inputs.environment }}
-          path: infra/terraform/environments/${{ inputs.environment }}/platform
+      # The plan job no longer uploads a tfplan artifact — a saved plan file
+      # stores every variable value in plaintext (DEVOPS-002). Re-plan the
+      # platform here so the apply below has a fresh, in-job plan; the destructive
+      # -plan guard runs on it exactly as before. ai_mode is the only platform
+      # variable; everything else is defaulted or workload-scoped.
+      - name: Terraform plan (platform) — re-plan for apply
+        run: terraform plan -out=tfplan -var="ai_mode=${AI_MODE}"
 
       - name: Generate GitHub App Token
         id: app-token
@@ -1016,6 +1093,16 @@ jobs:
       - name: Terraform plan (workload) — post-platform
         working-directory: infra/terraform/environments/${{ inputs.environment }}/workload
         env:
+          VAR_AI_ENGINE_DEFAULT: ${{ vars.CNA_AI_ENGINE_DEFAULT }}
+          VAR_AWS_MCP_ENDPOINT: ${{ vars.CNA_AWS_MCP_ENDPOINT }}
+          VAR_AWS_MCP_TRANSPORT: ${{ vars.CNA_AWS_MCP_TRANSPORT }}
+          VAR_AZURE_MCP_ENDPOINT: ${{ vars.CNA_AZURE_MCP_ENDPOINT }}
+          VAR_AZURE_MCP_TRANSPORT: ${{ vars.CNA_AZURE_MCP_TRANSPORT }}
+          VAR_DRAWIO_MCP_URL: ${{ vars.CNA_DRAWIO_MCP_URL }}
+          VAR_ENTRA_CLIENT_ID: ${{ vars.CNA_ENTRA_CLIENT_ID }}
+          VAR_FOUNDRY_PROJECT_ENDPOINT: ${{ vars.FOUNDRY_PROJECT_ENDPOINT }}
+          VAR_FOUNDRY_RECOMMENDATION_AGENT_ID: ${{ vars.FOUNDRY_RECOMMENDATION_AGENT_ID }}
+          VAR_NEXTAUTH_URL: ${{ vars.CNA_NEXTAUTH_URL }}
           TF_VAR_postgres_admin_password: ${{ secrets.CNA_POSTGRES_ADMIN_PASSWORD }}
           TF_VAR_entra_client_secret: ${{ secrets.CNA_ENTRA_CLIENT_SECRET }}
           TF_VAR_nextauth_secret: ${{ secrets.CNA_NEXTAUTH_SECRET }}
@@ -1035,31 +1122,31 @@ jobs:
           # ai_engine_default must satisfy the Terraform cross-variable validation for
           # the selected ai_mode: saas => azure-openai, byo-api => anthropic|openai.
           # A repo variable that names an engine from the other mode is ignored.
-          AI_MODE="${{ inputs.ai_mode }}"
-          AI_ENGINE_DEFAULT=$(optional_var "${{ vars.CNA_AI_ENGINE_DEFAULT }}")
+          AI_MODE="${AI_MODE}"
+          AI_ENGINE_DEFAULT=$(optional_var "$VAR_AI_ENGINE_DEFAULT")
           if [ "$AI_MODE" = "byo-api" ]; then
             case "$AI_ENGINE_DEFAULT" in anthropic|openai) ;; *) AI_ENGINE_DEFAULT="anthropic" ;; esac
           else
             AI_ENGINE_DEFAULT="azure-openai"
           fi
-          AZURE_MCP_ENDPOINT=$(optional_var "${{ vars.CNA_AZURE_MCP_ENDPOINT }}")
-          AZURE_MCP_TRANSPORT=$(optional_var "${{ vars.CNA_AZURE_MCP_TRANSPORT }}")
-          AWS_MCP_ENDPOINT=$(optional_var "${{ vars.CNA_AWS_MCP_ENDPOINT }}")
-          AWS_MCP_TRANSPORT=$(optional_var "${{ vars.CNA_AWS_MCP_TRANSPORT }}")
-          DRAWIO_MCP_URL=$(optional_var "${{ vars.CNA_DRAWIO_MCP_URL }}")
-          FOUNDRY_PROJECT_ENDPOINT=$(optional_var "${{ vars.FOUNDRY_PROJECT_ENDPOINT }}")
-          FOUNDRY_RECOMMENDATION_AGENT_ID=$(optional_var "${{ vars.FOUNDRY_RECOMMENDATION_AGENT_ID }}")
+          AZURE_MCP_ENDPOINT=$(optional_var "$VAR_AZURE_MCP_ENDPOINT")
+          AZURE_MCP_TRANSPORT=$(optional_var "$VAR_AZURE_MCP_TRANSPORT")
+          AWS_MCP_ENDPOINT=$(optional_var "$VAR_AWS_MCP_ENDPOINT")
+          AWS_MCP_TRANSPORT=$(optional_var "$VAR_AWS_MCP_TRANSPORT")
+          DRAWIO_MCP_URL=$(optional_var "$VAR_DRAWIO_MCP_URL")
+          FOUNDRY_PROJECT_ENDPOINT=$(optional_var "$VAR_FOUNDRY_PROJECT_ENDPOINT")
+          FOUNDRY_RECOMMENDATION_AGENT_ID=$(optional_var "$VAR_FOUNDRY_RECOMMENDATION_AGENT_ID")
           SECRET_EXPIRY=$(date -u -d "+90 days" "+%Y-%m-%dT%H:%M:%SZ")
 
           terraform plan -out=tfplan \
             -var="github_owner=${{ github.repository_owner }}" \
             -var="github_repository=${GITHUB_REPOSITORY#*/}" \
-            -var="api_image=${{ env.EFFECTIVE_API_IMAGE }}" \
-            -var="worker_image=${{ env.EFFECTIVE_WORKER_IMAGE }}" \
-            -var="web_image=${{ env.EFFECTIVE_WEB_IMAGE }}" \
-            -var="entra_client_id=${{ vars.CNA_ENTRA_CLIENT_ID }}" \
-            -var="nextauth_url=${{ vars.CNA_NEXTAUTH_URL }}" \
-            -var="container_registry_username=${{ vars.DOCKERHUB_NAMESPACE }}" \
+            -var="api_image=${EFFECTIVE_API_IMAGE}" \
+            -var="worker_image=${EFFECTIVE_WORKER_IMAGE}" \
+            -var="web_image=${EFFECTIVE_WEB_IMAGE}" \
+            -var="entra_client_id=${VAR_ENTRA_CLIENT_ID}" \
+            -var="nextauth_url=${VAR_NEXTAUTH_URL}" \
+            -var="container_registry_username=${DOCKERHUB_NAMESPACE}" \
             -var="ai_mode=${AI_MODE}" \
             -var="ai_engine_default=${AI_ENGINE_DEFAULT}" \
             -var="azure_mcp_endpoint=${AZURE_MCP_ENDPOINT}" \
@@ -1121,7 +1208,7 @@ jobs:
             if [[ -n "$TFSTATE_RESOURCE_GROUP" && "$TFSTATE_RESOURCE_GROUP" == *-tfstate ]]; then
               RESOURCE_GROUP_NAME="${TFSTATE_RESOURCE_GROUP%-tfstate}"
             else
-              RESOURCE_GROUP_NAME="rg-cna-${{ inputs.environment }}-${REGION_SHORT}"
+              RESOURCE_GROUP_NAME="rg-cna-${ENVIRONMENT}-${REGION_SHORT}"
             fi
             export RESOURCE_GROUP_NAME
           fi
@@ -1138,7 +1225,7 @@ jobs:
       - name: Resolve migrator image from deployment manifest
         id: resolve_migrator
         run: |
-          MANIFEST="$GITHUB_WORKSPACE/.deployment-catalog/${{ inputs.environment }}/deployment-manifest.json"
+          MANIFEST="$GITHUB_WORKSPACE/.deployment-catalog/${ENVIRONMENT}/deployment-manifest.json"
           mkdir -p "$(dirname "$MANIFEST")"
 
       - name: Download deployment manifest for migrator image
@@ -1150,7 +1237,7 @@ jobs:
       - name: Validate and export migrator image
         id: migrator_image
         run: |
-          MANIFEST="$GITHUB_WORKSPACE/.deployment-catalog/${{ inputs.environment }}/deployment-manifest.json"
+          MANIFEST="$GITHUB_WORKSPACE/.deployment-catalog/${ENVIRONMENT}/deployment-manifest.json"
           IMAGE=$(jq -r '.migrator_image // empty' "$MANIFEST" 2>/dev/null || echo "")
           echo "Resolved migrator image from manifest: '${IMAGE}'"
           if [[ -z "$IMAGE" ]]; then
@@ -1165,9 +1252,12 @@ jobs:
           echo "MIGRATOR_IMAGE=$IMAGE" >> "$GITHUB_ENV"
 
       - name: Wait for PostgreSQL server to be Ready
+        env:
+          DATABASE_SERVER_NAME: ${{ steps.export_ids.outputs.database_server_name }}
+          RESOURCE_GROUP_NAME: ${{ steps.export_ids.outputs.resource_group_name }}
         run: |
-          DB_SERVER="${{ steps.export_ids.outputs.database_server_name }}"
-          RG="${{ steps.export_ids.outputs.resource_group_name }}"
+          DB_SERVER="${DATABASE_SERVER_NAME}"
+          RG="${RESOURCE_GROUP_NAME}"
           echo "Waiting for $DB_SERVER to reach Ready state (DNS re-registration after zone update)..."
           for i in $(seq 1 36); do
             STATE=$(az postgres flexible-server show \
@@ -1189,17 +1279,20 @@ jobs:
         env:
           DOCKERHUB_USERNAME: ${{ vars.DOCKERHUB_NAMESPACE }}
           DOCKERHUB_PASSWORD: ${{ secrets.DOCKERHUB_TOKEN }}
+          RESOURCE_GROUP_NAME: ${{ steps.export_ids.outputs.resource_group_name }}
+          CONTAINER_APP_ENVIRONMENT_ID: ${{ steps.export_ids.outputs.container_app_environment_id }}
+          MIGRATOR_IMAGE_OUT: ${{ steps.migrator_image.outputs.image }}
         run: |
           DB_URL=$(terraform output -raw database_connection_string)
           # Empty when the break-glass local admin secret hasn't been bootstrapped
           # for this environment yet — the seed step in the migrator image no-ops
           # in that case, so this is safe to leave empty.
           LOCAL_ADMIN_PASSWORD_HASH=$(terraform output -raw local_admin_password 2>/dev/null || true)
-          RG="${{ steps.export_ids.outputs.resource_group_name }}"
-          CAE_ID="${{ steps.export_ids.outputs.container_app_environment_id }}"
+          RG="${RESOURCE_GROUP_NAME}"
+          CAE_ID="${CONTAINER_APP_ENVIRONMENT_ID}"
           CAE="${CAE_ID##*/}"
           DB_HOST=$(echo "$DB_URL" | sed 's|.*@||' | cut -d: -f1)
-          MIGRATOR_IMAGE="${{ steps.migrator_image.outputs.image }}"
+          MIGRATOR_IMAGE="${MIGRATOR_IMAGE_OUT}"
 
           echo "Migrator image: $MIGRATOR_IMAGE"
           if [[ -z "$MIGRATOR_IMAGE" || "$MIGRATOR_IMAGE" == *"quickstart"* || "$MIGRATOR_IMAGE" == *"k8se"* ]]; then
@@ -1288,7 +1381,7 @@ jobs:
             --secrets $MIGRATE_SECRETS \
             --env-vars $MIGRATE_ENV_VARS \
             --registry-server "docker.io" \
-            --registry-username "${{ vars.DOCKERHUB_NAMESPACE }}" \
+            --registry-username "$DOCKERHUB_NAMESPACE" \
             --registry-password "${{ secrets.DOCKERHUB_TOKEN }}"
           echo "Starting migration..."
           az containerapp job start --name "$JOB" --resource-group "$RG"
@@ -1334,9 +1427,12 @@ jobs:
         # version is created. This restart provides immediate pickup within the
         # same CI run. No min-replicas manipulation needed — scale-to-zero is
         # unaffected and there is no Terraform drift to restore.
+        env:
+          RESOURCE_GROUP_NAME: ${{ steps.export_ids.outputs.resource_group_name }}
+          WEB_CONTAINER_APP_NAME: ${{ steps.export_ids.outputs.web_container_app_name }}
         run: |
-          RG="${{ steps.export_ids.outputs.resource_group_name }}"
-          WEB_APP="${{ steps.export_ids.outputs.web_container_app_name }}"
+          RG="${RESOURCE_GROUP_NAME}"
+          WEB_APP="${WEB_CONTAINER_APP_NAME}"
           API_APP="${WEB_APP/-ca-web/-ca-api}"
 
           for APP in "$WEB_APP" "$API_APP"; do
@@ -1398,7 +1494,7 @@ jobs:
           if [[ -n "$TFSTATE_RESOURCE_GROUP" && "$TFSTATE_RESOURCE_GROUP" == *-tfstate ]]; then
             WORKLOAD_RG="${TFSTATE_RESOURCE_GROUP%-tfstate}"
           elif [[ -n "$REGION_SHORT" ]]; then
-            WORKLOAD_RG="rg-cna-${{ inputs.environment }}-${REGION_SHORT}"
+            WORKLOAD_RG="rg-cna-${ENVIRONMENT}-${REGION_SHORT}"
           else
             echo "::error::AZURE_REGION_SHORT is required when TFSTATE_RESOURCE_GROUP is not set."
             exit 1
@@ -1431,11 +1527,15 @@ jobs:
         env:
           DOCKERHUB_USERNAME: ${{ vars.DOCKERHUB_NAMESPACE }}
           DOCKERHUB_PASSWORD: ${{ secrets.DOCKERHUB_TOKEN }}
+          RESOURCE_GROUP_NAME: ${{ steps.export_ids.outputs.resource_group_name }}
+          CONTAINER_APP_ENVIRONMENT_ID: ${{ steps.export_ids.outputs.container_app_environment_id }}
+          PRIVATE_ENDPOINT_SUBNET_PREFIX: ${{ steps.export_ids.outputs.private_endpoint_subnet_prefix }}
+          WEB_CONTAINER_APP_NAME: ${{ steps.export_ids.outputs.web_container_app_name }}
         run: |
-          RG="${{ steps.export_ids.outputs.resource_group_name }}"
-          CAE_ID="${{ steps.export_ids.outputs.container_app_environment_id }}"
-          PE_PREFIX="${{ steps.export_ids.outputs.private_endpoint_subnet_prefix }}"
-          WEB_APP="${{ steps.export_ids.outputs.web_container_app_name }}"
+          RG="${RESOURCE_GROUP_NAME}"
+          CAE_ID="${CONTAINER_APP_ENVIRONMENT_ID}"
+          PE_PREFIX="${PRIVATE_ENDPOINT_SUBNET_PREFIX}"
+          WEB_APP="${WEB_CONTAINER_APP_NAME}"
           API_APP="${WEB_APP/-ca-web/-ca-api}"
           IDENTITY_ID=$(terraform output -raw managed_identity_id)
           CLIENT_ID=$(terraform output -raw managed_identity_client_id)
@@ -1584,19 +1684,23 @@ jobs:
 
       - name: Remove Runner IP from Key Vault
         if: always()
+        env:
+          VAR_KEY_VAULT_NAME: ${{ vars.KEY_VAULT_NAME }}
+          VAR_REGION_SHORT: ${{ vars.AZURE_REGION_SHORT }}
+          VAR_TFSTATE_RESOURCE_GROUP: ${{ vars.TFSTATE_RESOURCE_GROUP }}
         run: |
-          REGION_SHORT=${{ vars.AZURE_REGION_SHORT }}
-          if [[ -n "${{ vars.TFSTATE_RESOURCE_GROUP }}" && "${{ vars.TFSTATE_RESOURCE_GROUP }}" == *-tfstate ]]; then
-            WORKLOAD_RG="${{ vars.TFSTATE_RESOURCE_GROUP }}"
+          REGION_SHORT=${VAR_REGION_SHORT}
+          if [[ -n "$VAR_TFSTATE_RESOURCE_GROUP" && "$VAR_TFSTATE_RESOURCE_GROUP" == *-tfstate ]]; then
+            WORKLOAD_RG="$VAR_TFSTATE_RESOURCE_GROUP"
             WORKLOAD_RG="${WORKLOAD_RG%-tfstate}"
           else
-            WORKLOAD_RG="rg-cna-${{ inputs.environment }}-${REGION_SHORT}"
+            WORKLOAD_RG="rg-cna-${ENVIRONMENT}-${REGION_SHORT}"
           fi
           # Trust the Terraform-maintained KEY_VAULT_NAME variable (the real name
           # carries a suffix), but only if it matches THIS environment's prefix —
           # the variable is repo-level and both env workloads write it (last
           # apply wins). Bare "-kv" is the pre-first-apply fallback.
-          KEY_VAULT_NAME="${{ vars.KEY_VAULT_NAME }}"
+          KEY_VAULT_NAME="$VAR_KEY_VAULT_NAME"
           if [[ "$KEY_VAULT_NAME" != "${WORKLOAD_RG#rg-}-kv"* ]]; then
             # Variable missing or belongs to the other environment — resolve the
             # real vault (name carries a suffix, e.g. -kv2) from Azure instead of
@@ -1652,13 +1756,16 @@ jobs:
       # below built a malformed metric URL and failed under `set -e`. Re-derive them
       # for this job using the same logic the other jobs use.
       - name: Derive workload names
+        env:
+          VAR_REGION_SHORT: ${{ vars.AZURE_REGION_SHORT }}
+          VAR_TFSTATE_RESOURCE_GROUP: ${{ vars.TFSTATE_RESOURCE_GROUP }}
         run: |
-          REGION_SHORT="${{ vars.AZURE_REGION_SHORT }}"
-          if [[ -n "${{ vars.TFSTATE_RESOURCE_GROUP }}" && "${{ vars.TFSTATE_RESOURCE_GROUP }}" == *-tfstate ]]; then
-            WORKLOAD_RG="${{ vars.TFSTATE_RESOURCE_GROUP }}"
+          REGION_SHORT="$VAR_REGION_SHORT"
+          if [[ -n "$VAR_TFSTATE_RESOURCE_GROUP" && "$VAR_TFSTATE_RESOURCE_GROUP" == *-tfstate ]]; then
+            WORKLOAD_RG="$VAR_TFSTATE_RESOURCE_GROUP"
             WORKLOAD_RG="${WORKLOAD_RG%-tfstate}"
           else
-            WORKLOAD_RG="rg-cna-${{ inputs.environment }}-${REGION_SHORT}"
+            WORKLOAD_RG="rg-cna-${ENVIRONMENT}-${REGION_SHORT}"
           fi
           echo "WORKLOAD_RG=$WORKLOAD_RG" >> "$GITHUB_ENV"
           echo "WORKLOAD_NAME_PREFIX=${WORKLOAD_RG#rg-}" >> "$GITHUB_ENV"
@@ -1677,7 +1784,7 @@ jobs:
 
       - name: Wait for Container Apps to stabilize
         run: |
-          MANIFEST=".deployment-catalog/${{ inputs.environment }}/deployment-manifest.json"
+          MANIFEST=".deployment-catalog/${ENVIRONMENT}/deployment-manifest.json"
           AFD_HOST=$(python3 -c "import json; d=json.load(open('$MANIFEST')); print(d['platform_context']['frontdoor_endpoint_host_name'])")
           echo "AFD endpoint: $AFD_HOST"
 
@@ -1708,10 +1815,10 @@ jobs:
 
       - name: Query Azure Monitor health directly
         run: |
-          mkdir -p .verification/${{ inputs.environment }}
+          mkdir -p .verification/${ENVIRONMENT}
           METRIC_URL="https://management.azure.com/subscriptions/${{ secrets.AZURE_SUBSCRIPTION_ID }}/resourceGroups/$WORKLOAD_RG/providers/Microsoft.Cdn/profiles/$WORKLOAD_NAME_PREFIX-afd/providers/Microsoft.Insights/metrics?metricnames=OriginHealthPercentage&api-version=2023-10-01"
           THRESHOLD="${AZURE_MONITOR_HEALTH_THRESHOLD:-95}"
-          VDIR=".verification/${{ inputs.environment }}"
+          VDIR=".verification/${ENVIRONMENT}"
           MAX_WAIT=30
           ATTEMPT=0
           while [ $ATTEMPT -lt $MAX_WAIT ]; do
@@ -1736,31 +1843,36 @@ jobs:
         # unset, so it is effectively a no-op. Delete this step entirely as part of #100.
         if: vars.APPLICATION_INSIGHTS_NAME != 'none' && vars.APPLICATION_INSIGHTS_NAME != ''
         continue-on-error: true
+        env:
+          VAR_APPLICATION_INSIGHTS_NAME: ${{ vars.APPLICATION_INSIGHTS_NAME }}
         run: |
           az monitor app-insights query \
-            --app "${{ vars.APPLICATION_INSIGHTS_NAME }}" \
+            --app "$VAR_APPLICATION_INSIGHTS_NAME" \
             --resource-group "$WORKLOAD_RG" \
             --analytics-query "requests | summarize successRate = todouble(sum(itemCount * iif(success == true, 1, 0))) / todouble(sum(itemCount))" \
-            > .verification/${{ inputs.environment }}/canary-telemetry.json \
+            > .verification/${ENVIRONMENT}/canary-telemetry.json \
             || echo "App Insights query skipped — no telemetry data yet (fresh deploy)"
 
       - name: Execute progressive Front Door promotion actions
         run: |
           az afd route show \
             --ids "/subscriptions/${{ secrets.AZURE_SUBSCRIPTION_ID }}/resourceGroups/$WORKLOAD_RG/providers/Microsoft.Cdn/profiles/$WORKLOAD_NAME_PREFIX-afd/afdEndpoints/$WORKLOAD_NAME_PREFIX-afd-ep/routes/$WORKLOAD_NAME_PREFIX-afd-route" \
-            > .verification/${{ inputs.environment }}/staged-promotion.json
+            > .verification/${ENVIRONMENT}/staged-promotion.json
 
       - name: Query certificate monitoring and trigger renewal workflow
         if: vars.KEY_VAULT_NAME != 'none' && vars.KEY_VAULT_NAME != '' && vars.FRONTDOOR_CERTIFICATE_NAME != '' && vars.FRONTDOOR_CERTIFICATE_NAME != 'none'
+        env:
+          VAR_FRONTDOOR_CERTIFICATE_NAME: ${{ vars.FRONTDOOR_CERTIFICATE_NAME }}
+          VAR_KEY_VAULT_NAME: ${{ vars.KEY_VAULT_NAME }}
         run: |
           az keyvault certificate show \
-            --vault-name "${{ vars.KEY_VAULT_NAME }}" \
-            --name "${{ vars.FRONTDOOR_CERTIFICATE_NAME }}" \
-            > .verification/${{ inputs.environment }}/certificate-monitoring.json
+            --vault-name "$VAR_KEY_VAULT_NAME" \
+            --name "$VAR_FRONTDOOR_CERTIFICATE_NAME" \
+            > .verification/${ENVIRONMENT}/certificate-monitoring.json
           az keyvault certificate pending show \
-            --vault-name "${{ vars.KEY_VAULT_NAME }}" \
-            --name "${{ vars.FRONTDOOR_CERTIFICATE_NAME }}" \
-            > .verification/${{ inputs.environment }}/certificate-renewal-status.json || true
+            --vault-name "$VAR_KEY_VAULT_NAME" \
+            --name "$VAR_FRONTDOOR_CERTIFICATE_NAME" \
+            > .verification/${ENVIRONMENT}/certificate-renewal-status.json || true
 
       - name: Set up Python
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
@@ -1780,22 +1892,22 @@ jobs:
 
       - name: Persist release catalog entry
         run: |
-          cp .deployment-catalog/${{ inputs.environment }}/deployment-manifest.json \
-            .deployment-catalog/${{ inputs.environment }}/${{ github.run_id }}.json
-          cp .deployment-catalog/${{ inputs.environment }}/deployment-manifest.json \
-            .deployment-catalog/${{ inputs.environment }}/latest.json
+          cp .deployment-catalog/${ENVIRONMENT}/deployment-manifest.json \
+            .deployment-catalog/${ENVIRONMENT}/${{ github.run_id }}.json
+          cp .deployment-catalog/${ENVIRONMENT}/deployment-manifest.json \
+            .deployment-catalog/${ENVIRONMENT}/latest.json
 
       - name: Commit release catalog
         run: |
           set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add .deployment-catalog/${{ inputs.environment }}
+          git add .deployment-catalog/${ENVIRONMENT}
           if git diff --cached --quiet; then
             echo "No changes to commit"
             exit 0
           fi
-          git commit -m "chore(release-catalog): add progressive rollout and renewal verification for ${{ inputs.environment }} run ${{ github.run_id }}"
+          git commit -m "chore(release-catalog): add progressive rollout and renewal verification for ${ENVIRONMENT} run ${{ github.run_id }}"
           # Another run may push to main concurrently; rebase-and-push with retries
           # so a transient non-fast-forward doesn't drop the release-catalog entry
           # (which future rollbacks depend on). Fail loudly if it never lands.
