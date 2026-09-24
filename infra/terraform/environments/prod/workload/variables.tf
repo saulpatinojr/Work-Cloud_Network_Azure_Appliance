@@ -3,17 +3,17 @@
 # at pull time, which is exactly the failure the "no default for human-supplied
 # values" convention exists to prevent.
 variable "api_image" {
-  description = "Container image for CNA API (docker.io/<namespace>/cna:api-sha-<7>)"
+  description = "Container image for CNA API, pinned reference docker.io/<namespace>/cna:api-sha-<7>@sha256:<digest>"
   type        = string
 }
 
 variable "worker_image" {
-  description = "Container image for CNA worker (docker.io/<namespace>/cna:worker-sha-<7>)"
+  description = "Container image for CNA worker, pinned reference docker.io/<namespace>/cna:worker-sha-<7>@sha256:<digest>"
   type        = string
 }
 
 variable "web_image" {
-  description = "Container image for CNA web (docker.io/<namespace>/cna:web-sha-<7>)"
+  description = "Container image for CNA web, pinned reference docker.io/<namespace>/cna:web-sha-<7>@sha256:<digest>"
   type        = string
 }
 

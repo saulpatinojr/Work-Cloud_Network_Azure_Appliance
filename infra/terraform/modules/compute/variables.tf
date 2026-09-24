@@ -1,19 +1,16 @@
 variable "api_image" {
-  description = "Container image for CNA API"
+  description = "Container image for CNA API, pinned reference docker.io/<namespace>/cna:api-sha-<7>@sha256:<digest>"
   type        = string
-  default     = "docker.io/example-namespace/cna:api-latest"
 }
 
 variable "worker_image" {
-  description = "Container image for CNA worker"
+  description = "Container image for CNA worker, pinned reference docker.io/<namespace>/cna:worker-sha-<7>@sha256:<digest>"
   type        = string
-  default     = "docker.io/example-namespace/cna:worker-latest"
 }
 
 variable "web_image" {
-  description = "Container image for CNA Web (Next.js 15)"
+  description = "Container image for CNA Web (Next.js 15), pinned reference docker.io/<namespace>/cna:web-sha-<7>@sha256:<digest>"
   type        = string
-  default     = "docker.io/example-namespace/cna:web-latest"
 }
 
 variable "resource_group_name" {

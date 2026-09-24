@@ -100,8 +100,12 @@ Every operation is a workflow run from the **Actions → Run workflow** dialog, 
      are stored encrypted in the database. With one key that provider is used automatically; with
      both, a toggle on the same page chooses.
 
-   Leave the image inputs empty: the workflow pins the newest images from the core's build
-   manifest. `prod` applies run under the `hub` environment and wait for its required reviewers.
+   The image inputs are **pinned references** of the form
+   `docker.io/<namespace>/cna:<role>-sha-<7>@sha256:<digest>` — supply one per role (api, worker,
+   web, migrator). `230 · Image Update` fills them in automatically; to run `210` by hand, copy them
+   from the core's `.deployment-catalog/latest-build.json` (`images.<role>` + `digests.<role>`) or
+   from the `update-available` issue. Floating tags (`*-latest`, `:latest`) and empty values are
+   refused. `prod` applies run under the `hub` environment and wait for its required reviewers.
 
 Flipping `ai_mode` on a live environment destroys or creates the cloud AI resources — record the
 decision in `REVIEW.md` first.
@@ -120,8 +124,9 @@ An environment that has never been deployed is never touched by `230`.
 
 ### Everything else
 
-- **Rollback:** `210` with `deploy_mode: rollback` and the three `previous_*_image` references from
-  `.deployment-catalog/<env>/latest.json` (or a `<run_id>.json` archive).
+- **Rollback:** `210` with `deploy_mode: rollback` and the three `previous_*_image` references
+  from `.deployment-catalog/<env>/latest.json` (or a `<run_id>.json` archive); the migrator comes
+  from the same catalog record (`workflow_call` callers may pass `previous_migrator_image`).
 - **Emergency image swap:** `220` — fast, but it bypasses Terraform and the catalog; follow with a
   real `210` release.
 - **Drift:** `350` (dev, daily) and `360` (prod, manual) plan against the deployed images and
