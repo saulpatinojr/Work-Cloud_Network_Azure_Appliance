@@ -220,18 +220,25 @@ jobs:
             exit 1
           fi
 
-          echo "$DOCKERHUB_TOKEN" | docker login docker.io \
-            --username "$DOCKERHUB_NAMESPACE" \
-            --password-stdin
-
-          for image in \
-            "docker.io/${DOCKERHUB_NAMESPACE}/cna:api-latest" \
-            "docker.io/${DOCKERHUB_NAMESPACE}/cna:worker-latest" \
-            "docker.io/${DOCKERHUB_NAMESPACE}/cna:web-latest" \
-            "docker.io/${DOCKERHUB_NAMESPACE}/cna:migrator-latest"; do
-            echo "Checking $image"
-            docker manifest inspect "$image" > /dev/null
-          done
+          # Deploy-by-digest leaves no floating tag to probe (T-701). Verify pull
+          # access with the Docker registry v2 API instead: fetch a pull-scoped
+          # bearer token, then list one tag. The token is never printed.
+          set -euo pipefail
+          TOKEN=$(curl -sS -u "${DOCKERHUB_NAMESPACE}:${DOCKERHUB_TOKEN}" \
+            "https://auth.docker.io/token?service=registry.docker.io&scope=repository:${DOCKERHUB_NAMESPACE}/cna:pull" \
+            | jq -r '.token // empty')
+          if [ -z "$TOKEN" ]; then
+            echo "::error::Could not obtain a Docker Hub pull token for ${DOCKERHUB_NAMESPACE}/cna — check DOCKERHUB_NAMESPACE and DOCKERHUB_TOKEN."
+            exit 1
+          fi
+          STATUS=$(curl -sS -o /dev/null -w '%{http_code}' \
+            -H "Authorization: Bearer ${TOKEN}" \
+            "https://registry-1.docker.io/v2/${DOCKERHUB_NAMESPACE}/cna/tags/list?n=1")
+          if [ "$STATUS" != "200" ]; then
+            echo "::error::Docker Hub pull access check failed for ${DOCKERHUB_NAMESPACE}/cna (HTTP ${STATUS})."
+            exit 1
+          fi
+          echo "Docker Hub pull access for ${DOCKERHUB_NAMESPACE}/cna: OK"
 
       - name: Azure login via OIDC
         id: azure_login
