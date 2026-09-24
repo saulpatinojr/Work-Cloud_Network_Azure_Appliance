@@ -4,7 +4,7 @@ name: "220 · Fast Redeploy"
 # one or more Container Apps — no infrastructure changes.
 # ~2 minutes vs ~10+ minutes for a full Terraform deploy.
 # Prerequisite:
-#   Azure infrastructure must already be deployed by workflow 211.
+#   Azure infrastructure must already be deployed by workflow 210.
 
 on:
   workflow_dispatch:
@@ -55,10 +55,14 @@ jobs:
     environment: ${{ inputs.environment }}
     steps:
       - name: Validate — at least one image must be specified
+        env:
+          INPUT_API_IMAGE: ${{ inputs.api_image }}
+          INPUT_WORKER_IMAGE: ${{ inputs.worker_image }}
+          INPUT_WEB_IMAGE: ${{ inputs.web_image }}
         run: |
-          if [ -z "${{ inputs.api_image }}" ] && \
-             [ -z "${{ inputs.worker_image }}" ] && \
-             [ -z "${{ inputs.web_image }}" ]; then
+          if [ -z "$INPUT_API_IMAGE" ] && \
+             [ -z "$INPUT_WORKER_IMAGE" ] && \
+             [ -z "$INPUT_WEB_IMAGE" ]; then
             echo "::error::At least one image (api_image, worker_image, or web_image) must be specified."
             exit 1
           fi
@@ -99,39 +103,48 @@ jobs:
         if: inputs.api_image != ''
         env:
           API_IMAGE: ${{ inputs.api_image }}
+          API_APP: ${{ steps.names.outputs.api_app }}
+          RESOURCE_GROUP: ${{ steps.names.outputs.resource_group }}
         run: |
           az containerapp update \
-            --name "${{ steps.names.outputs.api_app }}" \
-            --resource-group "${{ steps.names.outputs.resource_group }}" \
+            --name "$API_APP" \
+            --resource-group "$RESOURCE_GROUP" \
             --image "$API_IMAGE"
 
       - name: Update cna-worker image
         if: inputs.worker_image != ''
         env:
           WORKER_IMAGE: ${{ inputs.worker_image }}
+          WORKER_APP: ${{ steps.names.outputs.worker_app }}
+          RESOURCE_GROUP: ${{ steps.names.outputs.resource_group }}
         run: |
           az containerapp update \
-            --name "${{ steps.names.outputs.worker_app }}" \
-            --resource-group "${{ steps.names.outputs.resource_group }}" \
+            --name "$WORKER_APP" \
+            --resource-group "$RESOURCE_GROUP" \
             --image "$WORKER_IMAGE"
 
       - name: Update cna-web image
         if: inputs.web_image != ''
         env:
           WEB_IMAGE: ${{ inputs.web_image }}
+          WEB_APP: ${{ steps.names.outputs.web_app }}
+          RESOURCE_GROUP: ${{ steps.names.outputs.resource_group }}
         run: |
           az containerapp update \
-            --name "${{ steps.names.outputs.web_app }}" \
-            --resource-group "${{ steps.names.outputs.resource_group }}" \
+            --name "$WEB_APP" \
+            --resource-group "$RESOURCE_GROUP" \
             --image "$WEB_IMAGE"
 
       - name: Verify cna-web health after update
         if: inputs.web_image != ''
+        env:
+          WEB_APP: ${{ steps.names.outputs.web_app }}
+          RESOURCE_GROUP: ${{ steps.names.outputs.resource_group }}
         run: |
           sleep 20
           WEB_FQDN=$(az containerapp show \
-            --name "${{ steps.names.outputs.web_app }}" \
-            --resource-group "${{ steps.names.outputs.resource_group }}" \
+            --name "$WEB_APP" \
+            --resource-group "$RESOURCE_GROUP" \
             --query properties.configuration.ingress.fqdn \
             --output tsv)
           STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
@@ -142,17 +155,24 @@ jobs:
           fi
 
       - name: Summary
+        env:
+          INPUT_API_IMAGE: ${{ inputs.api_image }}
+          INPUT_WORKER_IMAGE: ${{ inputs.worker_image }}
+          INPUT_WEB_IMAGE: ${{ inputs.web_image }}
+          API_APP: ${{ steps.names.outputs.api_app }}
+          WORKER_APP: ${{ steps.names.outputs.worker_app }}
+          WEB_APP: ${{ steps.names.outputs.web_app }}
         run: |
           echo "## Refresh Complete" >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
           echo "| Container App | Image |" >> "$GITHUB_STEP_SUMMARY"
           echo "|---|---|" >> "$GITHUB_STEP_SUMMARY"
-          if [ -n "${{ inputs.api_image }}" ]; then
-            echo "| \`${{ steps.names.outputs.api_app }}\` | \`${{ inputs.api_image }}\` |" >> "$GITHUB_STEP_SUMMARY"
+          if [ -n "$INPUT_API_IMAGE" ]; then
+            echo "| \`${API_APP}\` | \`${INPUT_API_IMAGE}\` |" >> "$GITHUB_STEP_SUMMARY"
           fi
-          if [ -n "${{ inputs.worker_image }}" ]; then
-            echo "| \`${{ steps.names.outputs.worker_app }}\` | \`${{ inputs.worker_image }}\` |" >> "$GITHUB_STEP_SUMMARY"
+          if [ -n "$INPUT_WORKER_IMAGE" ]; then
+            echo "| \`${WORKER_APP}\` | \`${INPUT_WORKER_IMAGE}\` |" >> "$GITHUB_STEP_SUMMARY"
           fi
-          if [ -n "${{ inputs.web_image }}" ]; then
-            echo "| \`${{ steps.names.outputs.web_app }}\` | \`${{ inputs.web_image }}\` |" >> "$GITHUB_STEP_SUMMARY"
+          if [ -n "$INPUT_WEB_IMAGE" ]; then
+            echo "| \`${WEB_APP}\` | \`${INPUT_WEB_IMAGE}\` |" >> "$GITHUB_STEP_SUMMARY"
           fi

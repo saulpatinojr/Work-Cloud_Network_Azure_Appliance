@@ -78,6 +78,26 @@ resource "azurerm_key_vault_secret" "credential_encryption_key" {
   }
 }
 
+# Bearer token cna-web sends to the internal cna-api on every request. Both
+# containers read it from this same secret as CNA_API_TOKEN, so the values match
+# without either being passed on a command line or a workflow input. The value
+# is a random_password generated in the workload root.
+resource "azurerm_key_vault_secret" "api_token" {
+  name            = "cna-api-token"
+  value           = var.api_token
+  key_vault_id    = var.key_vault_id
+  content_type    = "Bearer token for cna-api HTTP authentication"
+  expiration_date = var.secret_expiration_date
+
+  lifecycle {
+    # value: rotate by changing the random_password keepers (or deleting the
+    # secret) — an unrelated apply must not rewrite it and force a token change.
+    # expiration_date: metadata-only expiry updates fail the KV policy; expiry is
+    # set correctly whenever the value (and thus the version) changes.
+    ignore_changes = [value, expiration_date]
+  }
+}
+
 # Break-glass local admin: only created when the bootstrap script has
 # generated and pushed the hash (var.local_admin_password != null). Existing
 # environments that haven't bootstrapped this secret yet keep deploying
